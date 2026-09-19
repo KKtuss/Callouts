@@ -1,6 +1,6 @@
 # Callout Snap
 
-Private snapshot engine with a **broadcast-only** Telegram channel.
+Private snapshot engine for **one coin** with a **broadcast-only** Telegram channel.
 
 Viewers can watch snapshot announcements, the roulette animation, and distribution confirmations. They cannot configure the bot, trigger rounds, change allocations, pause the system, or influence recipient selection.
 
@@ -8,23 +8,22 @@ Viewers can watch snapshot announcements, the roulette animation, and distributi
 
 ```text
 PUBLIC
+  Pump.fun app/web  →  callouts on the configured mint
   Telegram channel  →  broadcast messages only
 
 PRIVATE
-  Callout collector
+  Pump poller (mint-locked) → unique collector (1 per wallet/username)
        ↓
-  Snapshot engine
+  Snapshot engine (random 5–15 min window)
        ↓
-  Recipient selection (CSPRNG)
+  Recipients: last unique callout + one CSPRNG unique callout
        ↓
-  Treasury
-       ↓
-  Blockchain
+  Treasury sendout (both wallets)
        ↓
   Telegram broadcast
 ```
 
-Telegram is an output layer. It is never the control plane for the treasury.
+Telegram is an output layer. It is never the control plane for the treasury. The engine is locked to one mint (`CALLOUT_MINT`). Aiden is the current test mint; swap the env for launch.
 
 ## What the public channel publishes
 
@@ -49,7 +48,7 @@ npm run dev
 
 Open [http://127.0.0.1:43147](http://127.0.0.1:43147).
 
-The page is the **private operations console**. The left pane is a live preview of the public broadcast channel, including edited messages. Use **Run snapshot now** to fire a round immediately. In demo mode a first snapshot also runs shortly after boot; later rounds are randomized between 5–15 minutes.
+The page is the **private operations console**. Live mode (`DEMO_FEED=false`, `PUMP_INGEST=true`) polls Pump.fun for the configured mint and stores the first callout per username or wallet in the current window. Snapshots fire at a random time between 5 and 15 minutes, freeze that window, and send treasury allocations to the last unique caller and one random unique caller. Use **Run snapshot now** to fire a round immediately.
 
 ## Optional live Telegram publishing
 
@@ -70,8 +69,10 @@ Callouts enter through the collector, not Telegram:
 ```bash
 curl -X POST http://127.0.0.1:43147/api/ingest/callout \
   -H 'content-type: application/json' \
-  -d '{"token":"$BONK","callerUsername":"alpha","wallet":"7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU","source":"private-ingest"}'
+  -d '{"callerUsername":"alpha","wallet":"7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU","source":"private-ingest"}'
 ```
+
+The engine is locked to a single coin (`CALLOUT_TOKEN` / `CALLOUT_MINT`, default `$AIDEN` / `4i5FqkfYDAPcEVcXyuVyaaBcz3bpwJPqDkmaF36kpump`). Other tickers are rejected. Live ingest polls `GET https://frontend-api-v3.pump.fun/home-feed/new` (Pump’s chronological “new” callouts across all coins) and keeps only rows for the watched mint. Pump’s `/callout/top/{mint}` ranks by peak multiple, not time, so it is not used for live capture. Callouts older than the current window are ignored for snapshots, but all accepted callouts since mint watch count toward the bonding bonus (≥3 accepted → eligible). On Pump bonding/migration, one random still-holding eligible wallet receives the configured migration bonus (default 10M = 1% of 1B supply).
 
 If `ADMIN_KEY` is set, send it as `x-admin-key` (or a `admin_key` cookie). Pause, resume, snapshot, and config endpoints live under `/api/admin/*` and are not exposed as Telegram commands.
 

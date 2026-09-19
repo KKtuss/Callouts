@@ -2,7 +2,15 @@ import { NextResponse } from "next/server"
 
 export function requireAdmin(request: Request): NextResponse | null {
   const expected = process.env.ADMIN_KEY?.trim()
-  if (!expected) return null
+  if (!expected) {
+    if (process.env.NODE_ENV === "production" || process.env.VERCEL === "1") {
+      return NextResponse.json(
+        { error: "ADMIN_KEY is not configured on this deployment." },
+        { status: 503 },
+      )
+    }
+    return null
+  }
 
   const header = request.headers.get("x-admin-key")?.trim()
   const cookie = request.headers

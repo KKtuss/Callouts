@@ -15,7 +15,29 @@ export function isValidToken(token: string): boolean {
 
 export function isValidCaller(username: string): boolean {
   const value = username.trim().replace(/^@/, "")
-  return /^[A-Za-z0-9_]{2,32}$/.test(value)
+  return value.length >= 1 && value.length <= 64
+}
+
+export function callerKey(username: string): string {
+  return username.trim().replace(/^@/, "").toLowerCase()
+}
+
+export class DuplicateCalloutError extends Error {
+  existing: Callout
+  constructor(existing: Callout) {
+    super("Caller already has a callout in this snapshot window")
+    this.name = "DuplicateCalloutError"
+    this.existing = existing
+  }
+}
+
+export function isDuplicateCalloutError(error: unknown): error is DuplicateCalloutError {
+  return (
+    error instanceof DuplicateCalloutError ||
+    (error instanceof Error &&
+      error.name === "DuplicateCalloutError" &&
+      "existing" in error)
+  )
 }
 
 export function generateWallet(): string {
@@ -33,6 +55,7 @@ export function normalizeCallout(input: {
   source: string
   capturedAt?: string
   id?: string
+  thesis?: string
 }): Callout {
   if (!isValidToken(input.token)) {
     throw new Error("Invalid callout token")
@@ -54,6 +77,7 @@ export function normalizeCallout(input: {
     wallet: input.wallet.trim(),
     capturedAt: input.capturedAt ?? new Date().toISOString(),
     source: input.source.trim(),
+    thesis: input.thesis?.trim() || undefined,
   }
 }
 
@@ -67,6 +91,37 @@ export class CalloutCollector {
       this.callouts = this.callouts.slice(-4_000)
     }
     return callout
+  }
+
+  /**
+   * One callout per username or wallet in the current snapshot window.
+   * The first accepted callout wins; later ones from the same identity are dropped.
+   */
+  ingestUnique(
+    input: Parameters<typeof normalizeCallout>[0],
+    windowStart: Date,
+  ): { callout: Callout; duplicate: boolean } {
+    const callout = normalizeCallout(input)
+    const existing = this.findDuplicate(callout, windowStart)
+    if (existing) return { callout: existing, duplicate: true }
+    this.callouts.push(callout)
+    if (this.callouts.length > 5_000) {
+      this.callouts = this.callouts.slice(-4_000)
+    }
+    return { callout, duplicate: false }
+  }
+
+  findDuplicate(callout: Pick<Callout, "callerUsername" | "wallet" | "capturedAt">, windowStart: Date): Callout | null {
+    const startIso = windowStart.toISOString()
+    const user = callerKey(callout.callerUsername)
+    const wallet = callout.wallet.trim()
+    return (
+      this.callouts.find(
+        (item) =>
+          item.capturedAt >= startIso &&
+          (callerKey(item.callerUsername) === user || item.wallet === wallet),
+      ) ?? null
+    )
   }
 
   /**
@@ -85,5 +140,9 @@ export class CalloutCollector {
 
   all(): Callout[] {
     return [...this.callouts]
+  }
+
+  clear() {
+    this.callouts = []
   }
 }

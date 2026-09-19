@@ -6,7 +6,9 @@ import {
   escapeHtml,
   formatAmount,
   formatSnapshotWindow,
+  formatSol,
   minutesLabel,
+  progressBar,
   truncateSig,
   truncateWallet,
 } from "@/lib/format"
@@ -102,10 +104,10 @@ export function rouletteStart(): FormattedMessage {
   return pair(html, text, "roulette")
 }
 
-export function rouletteSpin(token: string): FormattedMessage {
-  const ticker = displayToken(token)
-  const text = ["🎰 ROULETTE", "", `🔄 ${ticker}`].join("\n")
-  const html = [`🎰 ${bold("ROULETTE")}`, "", `🔄 ${bold(ticker)}`].join("\n")
+export function rouletteSpin(callerUsername: string): FormattedMessage {
+  const caller = displayUsername(callerUsername)
+  const text = ["🎰 ROULETTE", "", `🔄 ${caller}`].join("\n")
+  const html = [`🎰 ${bold("ROULETTE")}`, "", `🔄 ${bold(caller)}`].join("\n")
   return pair(html, text, "roulette")
 }
 
@@ -445,6 +447,202 @@ export function snapshotFinal(input: {
     `⏳ Randomized between ${escapeHtml(range)}`,
   ].join("\n")
 
+  return pair(html, text, "final")
+}
+
+export function qualifiedCaller(input: {
+  callout: Callout
+  windowCount: number
+  explorer?: ExplorerLinks
+}): FormattedMessage {
+  const caller = displayUsername(input.callout.callerUsername)
+  const ticker = displayToken(input.callout.token)
+  const wallet = walletLine(input.callout.wallet, input.explorer)
+  const text = [
+    "✅ QUALIFIED",
+    "",
+    ticker,
+    "",
+    caller,
+    "",
+    "Wallet:",
+    wallet.text,
+    "",
+    `Eligible this snapshot: ${input.windowCount}`,
+  ].join("\n")
+  const html = [
+    `✅ ${bold("QUALIFIED")}`,
+    "",
+    bold(ticker),
+    "",
+    escapeHtml(caller),
+    "",
+    "Wallet:",
+    wallet.html,
+    "",
+    `Eligible this snapshot: ${bold(String(input.windowCount))}`,
+  ].join("\n")
+  return pair(html, text, "qualified")
+}
+
+export function bondProgress(input: {
+  token: string
+  percent: number
+  solRaised: number
+  solTarget: number
+  eligibleCount: number
+  minCallouts: number
+  bonded?: boolean
+}): FormattedMessage {
+  const ticker = displayToken(input.token)
+  const bar = progressBar(input.percent)
+  const fill = `${formatSol(input.solRaised)} / ${formatSol(input.solTarget)} SOL`
+  const status = input.bonded || input.percent >= 100 ? "BONDED" : `${input.percent}%`
+  const text = [
+    "🧬 BOND",
+    "",
+    ticker,
+    "",
+    `${bar} ${status}`,
+    fill,
+    "",
+    `Bonus pool: ${input.eligibleCount} wallet${input.eligibleCount === 1 ? "" : "s"} (≥${input.minCallouts} callouts)`,
+  ].join("\n")
+  const html = [
+    `🧬 ${bold("BOND")}`,
+    "",
+    bold(ticker),
+    "",
+    `${code(bar)} ${bold(status)}`,
+    escapeHtml(fill),
+    "",
+    `Bonus pool: ${bold(String(input.eligibleCount))} wallet${input.eligibleCount === 1 ? "" : "s"} (≥${input.minCallouts} callouts)`,
+  ].join("\n")
+  return pair(html, text, "bond")
+}
+
+export function migrationDetected(input: {
+  token: string
+  eligibleCount: number
+  holderCount?: number
+  bonusAmount: number
+  distributionToken: string
+}): FormattedMessage {
+  const ticker = displayToken(input.token)
+  const amount = formatAmount(input.bonusAmount, input.distributionToken)
+  const holders =
+    input.holderCount == null
+      ? `${input.eligibleCount} eligible wallets`
+      : `${input.holderCount} still holding (${input.eligibleCount} eligible)`
+  const text = [
+    "🚀 BONDED",
+    "",
+    ticker,
+    "",
+    "Pump.fun curve complete.",
+    holders,
+    "",
+    `Bonus: ${amount}`,
+    "",
+    "Selecting winner...",
+  ].join("\n")
+  const html = [
+    `🚀 ${bold("BONDED")}`,
+    "",
+    bold(ticker),
+    "",
+    "Pump.fun curve complete.",
+    escapeHtml(holders),
+    "",
+    `Bonus: ${bold(amount)}`,
+    "",
+    "Selecting winner...",
+  ].join("\n")
+  return pair(html, text, "migration")
+}
+
+export function migrationSkipped(reason: string): FormattedMessage {
+  const text = ["🚀 BONDING BONUS", "", "Skipped", "", reason].join("\n")
+  const html = [`🚀 ${bold("BONDING BONUS")}`, "", bold("Skipped"), "", escapeHtml(reason)].join("\n")
+  return pair(html, text, "migration")
+}
+
+export function migrationWinner(input: {
+  callerUsername: string
+  wallet: string
+  calloutCount: number
+  amount: number
+  distributionToken: string
+  explorer?: ExplorerLinks
+}): FormattedMessage {
+  const caller = displayUsername(input.callerUsername)
+  const amount = formatAmount(input.amount, input.distributionToken)
+  const wallet = walletLine(input.wallet, input.explorer)
+  const text = [
+    "🎯 BONDING BONUS",
+    "",
+    "SELECTED",
+    "",
+    caller,
+    "",
+    "Wallet:",
+    wallet.text,
+    "",
+    `${input.calloutCount} accepted callouts`,
+    "",
+    "Allocation:",
+    amount,
+  ].join("\n")
+  const html = [
+    `🎯 ${bold("BONDING BONUS")}`,
+    "",
+    bold("SELECTED"),
+    "",
+    escapeHtml(caller),
+    "",
+    "Wallet:",
+    wallet.html,
+    "",
+    `${input.calloutCount} accepted callouts`,
+    "",
+    "Allocation:",
+    bold(amount),
+  ].join("\n")
+  return pair(html, text, "migration")
+}
+
+export function migrationFinal(input: {
+  callerUsername: string
+  wallet: string
+  tx: DistributionTx
+  amount: number
+  distributionToken: string
+  explorer?: ExplorerLinks
+}): FormattedMessage {
+  const caller = displayUsername(input.callerUsername)
+  const amount = formatAmount(input.amount, input.distributionToken)
+  const wallet = walletLine(input.wallet, input.explorer)
+  const confirmed = formatConfirmedBlock(input.tx, input.explorer)
+  const text = [
+    "✅ BONDING BONUS SENT",
+    "",
+    caller,
+    `→ ${wallet.text}`,
+    "",
+    `${amount} sent`,
+    "",
+    confirmed.text,
+  ].join("\n")
+  const html = [
+    `✅ ${bold("BONDING BONUS SENT")}`,
+    "",
+    escapeHtml(caller),
+    `→ ${wallet.html}`,
+    "",
+    `${escapeHtml(amount)} sent`,
+    "",
+    confirmed.html,
+  ].join("\n")
   return pair(html, text, "final")
 }
 

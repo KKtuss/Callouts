@@ -3,24 +3,6 @@ import { pickIndex, nodeSecureRandom, type SecureRandom } from "@/lib/crypto-ran
 import { generateWallet, normalizeCallout } from "@/engine/collector"
 import type { Callout, EngineConfig } from "@/engine/types"
 
-const TOKENS = [
-  "BONK",
-  "WIF",
-  "POPCAT",
-  "MEW",
-  "PNUT",
-  "GOAT",
-  "MOODENG",
-  "GIGA",
-  "TREMP",
-  "RETARDIO",
-  "SLERF",
-  "BOME",
-  "WEN",
-  "JUP",
-  "PYTH",
-]
-
 const CALLERS = [
   "alpha",
   "degenwhale",
@@ -61,10 +43,9 @@ export class CalloutFeeder {
   emitOne(now = new Date()): Callout {
     const cfg = this.config()
     const source = cfg.calloutSources[0] ?? "demo-feed"
-    const token = TOKENS[pickIndex(TOKENS.length, this.random)]
     const caller = CALLERS[pickIndex(CALLERS.length, this.random)]
     const callout = normalizeCallout({
-      token,
+      token: cfg.distributionToken,
       callerUsername: caller,
       wallet: generateWallet(),
       source,

@@ -5,11 +5,12 @@ export type Callout = {
   wallet: string
   capturedAt: string
   source: string
+  thesis?: string
 }
 
 export type SelectionMethod = "node:crypto.randomInt"
 
-export type RecipientKind = "last_callout" | "roulette"
+export type RecipientKind = "last_callout" | "roulette" | "migration_bonus"
 
 export type TxStatus = "pending" | "confirmed" | "failed"
 
@@ -89,6 +90,9 @@ export type ChannelMessageKind =
   | "recipients"
   | "distribution"
   | "final"
+  | "qualified"
+  | "bond"
+  | "migration"
 
 export type ChannelMessage = {
   id: string
@@ -104,6 +108,8 @@ export type ChannelMessage = {
 export type EngineConfig = {
   allocationAmount: number
   distributionToken: string
+  coinMint: string | null
+  coinName: string | null
   snapshotMinMs: number
   snapshotMaxMs: number
   startupSnapshotDelayMs: number | null
@@ -113,10 +119,45 @@ export type EngineConfig = {
   feederEnabled: boolean
   feederMinMs: number
   feederMaxMs: number
+  pumpIngestEnabled: boolean
+  axiomIngestEnabled: boolean
   explorerTxTemplate: string
   explorerAddressTemplate: string
   treasuryPublicAddress: string
   calloutSources: string[]
+  /** Tokens sent on bonding/migration (default 10M = 1% of 1B Pump supply). */
+  migrationBonusAmount: number
+  /** Minimum accepted callouts since mint watch started. */
+  migrationMinCallouts: number
+  migrationPollMs: number
+}
+
+export type MigrationAudit = {
+  id: string
+  mint: string
+  distributionToken: string
+  detectedAt: string
+  watchStartedAt: string
+  minCallouts: number
+  eligibleCount: number
+  holderCount: number
+  winner: {
+    wallet: string
+    callerUsername: string
+    calloutCount: number
+  } | null
+  selectionEntropyHex: string
+  amount: number
+  transaction: DistributionTx | null
+  confirmationStatus: "in_progress" | "confirmed" | "partial_failure" | "skipped"
+  skipReason: string | null
+  telegramMessageIds: {
+    bond?: string
+    detected?: string
+    distribution?: string
+    final?: string
+  }
+  completedAt: string | null
 }
 
 export type EngineStatus = {
@@ -134,6 +175,37 @@ export type EngineStatus = {
   calloutsInWindow: number
   treasuryPublicAddress: string
   treasuryBalance: number
+  treasuryKeyConfigured: boolean
+  migration: {
+    watchStartedAt: string | null
+    bonded: boolean
+    paid: boolean
+    lastCheckAt: string | null
+    lastError: string | null
+    eligibleCount: number
+    progressPercent: number | null
+    solRaised: number | null
+    solTarget: number
+  }
+  pumpIngest: {
+    enabled: boolean
+    connected: boolean
+    lastPollAt: string | null
+    lastError: string | null
+    lastFeedCount: number
+    accepted: number
+    skipped: number
+  }
+  axiomIngest: {
+    enabled: boolean
+    connected: boolean
+    lastPollAt: string | null
+    lastError: string | null
+    lastFeedCount: number
+    accepted: number
+    skipped: number
+    cookieConfigured: boolean
+  }
   config: EngineConfig
 }
 
@@ -142,6 +214,7 @@ export type ClientState = {
   messages: ChannelMessage[]
   callouts: Callout[]
   audits: SnapshotAudit[]
+  migrations: MigrationAudit[]
 }
 
 export type EngineEvent =

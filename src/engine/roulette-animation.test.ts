@@ -5,7 +5,7 @@ import type { SecureRandom } from "@/lib/crypto-random"
 
 const winner: Callout = {
   id: "win",
-  token: "$TOKEN_D",
+  token: "$BONK",
   callerUsername: "@winner",
   wallet: "4LmXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   capturedAt: "2026-09-19T17:10:00.000Z",
@@ -15,7 +15,7 @@ const winner: Callout = {
 const pool: Callout[] = [
   {
     id: "a",
-    token: "$TOKEN_A",
+    token: "$BONK",
     callerUsername: "@a",
     wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
     capturedAt: "2026-09-19T17:02:00.000Z",
@@ -23,7 +23,7 @@ const pool: Callout[] = [
   },
   {
     id: "b",
-    token: "$TOKEN_B",
+    token: "$BONK",
     callerUsername: "@b",
     wallet: "8xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
     capturedAt: "2026-09-19T17:04:00.000Z",
@@ -45,7 +45,11 @@ describe("buildRouletteFrames", () => {
   it("is visual-only and always ends on the preselected winner", () => {
     const frames = buildRouletteFrames(pool, winner, 6, 400, new ZeroRandom())
     expect(frames).toHaveLength(6)
-    expect(frames.at(-1)).toMatchObject({ token: "$TOKEN_D", calloutId: "win" })
+    expect(frames.at(-1)).toMatchObject({
+      token: "$BONK",
+      callerUsername: "@winner",
+      calloutId: "win",
+    })
     expect(frames.slice(0, -1).every((frame) => frame.calloutId === "a")).toBe(true)
   })
 })

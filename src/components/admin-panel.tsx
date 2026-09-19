@@ -20,7 +20,8 @@ import { Separator } from "@/components/ui/separator"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import type { ClientState, EngineConfig, SnapshotAudit } from "@/engine/types"
-import { formatClockIso, formatDateTimeIso, formatInteger, truncateWallet } from "@/lib/format"
+import { formatClockIso, formatDateTimeIso, formatInteger, truncateWallet, displayToken } from "@/lib/format"
+import { explorerAddressUrl } from "@/lib/explorer"
 
 function phaseCopy(state: ClientState): string {
   if (state.status.snapshotInProgress) {
@@ -75,7 +76,6 @@ export function AdminPanel({ state }: { state: ClientState }) {
   const [minMin, setMinMin] = useState(String(Math.round(state.status.config.snapshotMinMs / 60_000)))
   const [maxMin, setMaxMin] = useState(String(Math.round(state.status.config.snapshotMaxMs / 60_000)))
   const [manual, setManual] = useState({
-    token: "$BONK",
     caller: "opsdesk",
     wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   })
@@ -115,12 +115,44 @@ export function AdminPanel({ state }: { state: ClientState }) {
             </Badge>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-4 pt-4 sm:grid-cols-3">
+        <CardContent className="grid gap-4 pt-4 sm:grid-cols-5">
           <Metric label="Next snapshot" value={countdown} hint={state.status.nextSnapshotRangeLabel} />
           <Metric
             label="Callouts in window"
             value={String(state.status.calloutsInWindow)}
-            hint="Frozen at snapshot time"
+            hint="Unique callers since last snapshot"
+          />
+          <Metric
+            label="Axiom ingest"
+            value={
+              state.status.axiomIngest?.enabled
+                ? state.status.axiomIngest.connected
+                  ? "live"
+                  : "polling"
+                : state.status.axiomIngest?.cookieConfigured
+                  ? "idle"
+                  : "no cookie"
+            }
+            hint={
+              state.status.axiomIngest?.lastError
+                ? state.status.axiomIngest.lastError
+                : `${state.status.axiomIngest?.lastFeedCount ?? 0} on Axiom · ${state.status.axiomIngest?.accepted ?? 0} in window`
+            }
+          />
+          <Metric
+            label="Pump.fun ingest"
+            value={
+              state.status.pumpIngest?.enabled
+                ? state.status.pumpIngest.connected
+                  ? "live"
+                  : "polling"
+                : "off"
+            }
+            hint={
+              state.status.pumpIngest?.lastError
+                ? state.status.pumpIngest.lastError
+                : `${state.status.pumpIngest?.lastFeedCount ?? 0} on Pump · ${state.status.pumpIngest?.accepted ?? 0} in window`
+            }
           />
           <Metric
             label="Treasury"
@@ -167,18 +199,14 @@ export function AdminPanel({ state }: { state: ClientState }) {
                 Collector window
               </CardTitle>
               <CardDescription>
-                Ingest is private. Callouts arriving after a snapshot timestamp cannot change
-                that round’s recipients.
+                Live Pump.fun callouts for {displayToken(state.status.config.distributionToken)}
+                {state.status.config.coinName ? ` (${state.status.config.coinName})` : ""}.
+                One callout per username or wallet per window. Snapshot pays the last caller and
+                one random caller.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
-              <div className="grid gap-2 sm:grid-cols-3">
-                <Field label="Token">
-                  <Input
-                    value={manual.token}
-                    onChange={(e) => setManual((m) => ({ ...m, token: e.target.value }))}
-                  />
-                </Field>
+              <div className="grid gap-2 sm:grid-cols-2">
                 <Field label="Caller">
                   <Input
                     value={manual.caller}
@@ -199,7 +227,6 @@ export function AdminPanel({ state }: { state: ClientState }) {
                 onClick={() =>
                   run("ingest", () =>
                     post("/api/ingest/callout", {
-                      token: manual.token,
                       callerUsername: manual.caller,
                       wallet: manual.wallet,
                       source: "private-ingest",
@@ -223,7 +250,7 @@ export function AdminPanel({ state }: { state: ClientState }) {
                       <div className="min-w-0">
                         <div className="truncate text-sm">{callout.callerUsername}</div>
                         <div className="truncate font-mono text-[11px] text-muted-foreground">
-                          {truncateWallet(callout.wallet)}
+                          {truncateWallet(callout.wallet)} · {callout.source}
                         </div>
                       </div>
                       <span className="text-[11px] text-muted-foreground">
@@ -242,8 +269,8 @@ export function AdminPanel({ state }: { state: ClientState }) {
             <CardHeader>
               <CardTitle className="text-sm">Engine configuration</CardTitle>
               <CardDescription>
-                Allocation, cadence, and sources are owned by this console — never by channel
-                viewers.
+                Allocation, cadence, and the single coin are owned by this console — never by
+                channel viewers.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
@@ -251,8 +278,12 @@ export function AdminPanel({ state }: { state: ClientState }) {
                 <Field label="Allocation per recipient">
                   <Input value={amount} onChange={(e) => setAmount(e.target.value)} />
                 </Field>
-                <Field label="Distribution token">
-                  <Input value={token} onChange={(e) => setToken(e.target.value)} />
+                <Field label="Coin">
+                  <Input
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    disabled={Boolean(state.status.config.coinMint)}
+                  />
                 </Field>
                 <Field label="Min interval (minutes)">
                   <Input value={minMin} onChange={(e) => setMinMin(e.target.value)} />
@@ -261,11 +292,31 @@ export function AdminPanel({ state }: { state: ClientState }) {
                   <Input value={maxMin} onChange={(e) => setMaxMin(e.target.value)} />
                 </Field>
               </div>
+              {state.status.config.coinMint ? (
+                <div className="rounded-lg border border-white/10 bg-muted/30 p-3">
+                  <div className="text-[11px] tracking-wide text-muted-foreground uppercase">Mint</div>
+                  <div className="mt-1 break-all font-mono text-xs">
+                    {state.status.config.coinMint}
+                  </div>
+                  <a
+                    className="mt-2 inline-block text-xs text-sky-300 hover:underline"
+                    href={explorerAddressUrl(
+                      state.status.config.coinMint,
+                      state.status.config.explorerAddressTemplate,
+                    )}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open on Solscan
+                  </a>
+                </div>
+              ) : null}
               <div className="flex items-center justify-between rounded-lg border border-white/10 px-3 py-2">
                 <div>
                   <div className="text-sm font-medium">Demo callout feeder</div>
                   <div className="text-xs text-muted-foreground">
-                    Simulated collector. Not a Telegram input path.
+                    Simulated collector for {displayToken(state.status.config.distributionToken)}.
+                    Not a Telegram input path.
                   </div>
                 </div>
                 <Switch
@@ -277,7 +328,7 @@ export function AdminPanel({ state }: { state: ClientState }) {
                 onClick={() =>
                   saveConfig({
                     allocationAmount: Number(amount),
-                    distributionToken: token.trim() || "TOKEN",
+                    distributionToken: token.trim() || state.status.config.distributionToken,
                     snapshotMinMs: Number(minMin) * 60_000,
                     snapshotMaxMs: Number(maxMin) * 60_000,
                   })
@@ -307,9 +358,16 @@ export function AdminPanel({ state }: { state: ClientState }) {
               </div>
               <p className="text-sm text-muted-foreground">
                 Balance {formatInteger(state.status.treasuryBalance)}{" "}
-                {state.status.config.distributionToken}. Demo mode mocks Solana confirmations and
-                still emits explorer links for the public trail.
+                {state.status.config.distributionToken}
+                {state.status.config.coinName ? ` · ${state.status.config.coinName}` : ""}. Demo
+                mode mocks Solana confirmations and still emits explorer links for the public
+                trail.
               </p>
+              {state.status.config.coinMint ? (
+                <div className="rounded-lg bg-muted/40 p-3 font-mono text-xs break-all">
+                  Mint {state.status.config.coinMint}
+                </div>
+              ) : null}
             </CardContent>
           </Card>
         </TabsContent>
@@ -352,10 +410,10 @@ function Metric({ label, value, hint }: { label: string; value: string; hint: st
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="grid gap-1.5">
+    <div className="grid gap-1.5">
       <Label>{label}</Label>
       {children}
-    </label>
+    </div>
   )
 }
 
@@ -371,18 +429,18 @@ function AuditCard({ audit }: { audit: SnapshotAudit }) {
         </div>
         <div className="mt-1 text-sm text-muted-foreground">
           {audit.skipReason ??
-            `${audit.calloutCount} callouts · last ${audit.lastCallout.token} · roulette ${audit.rouletteWinner.token}`}
+            `${audit.calloutCount} callouts · last ${audit.lastCallout.callerUsername} · roulette ${audit.rouletteWinner.callerUsername}`}
         </div>
       </summary>
       <div className="mt-3 space-y-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
         <div>Previous snapshot: {audit.previousSnapshotTimestamp ?? "none"}</div>
         <div>Window: {audit.windowStart} → {audit.windowEnd}</div>
-        <div>Last callout: {audit.lastCallout.token} {audit.lastCallout.wallet}</div>
+        <div>Last callout: {audit.lastCallout.callerUsername} {audit.lastCallout.wallet}</div>
         <div>
-          Roulette pool: {audit.rouletteCandidatePool.map((item) => item.token).join(", ") || "—"}
+          Roulette pool: {audit.rouletteCandidatePool.map((item) => item.callerUsername).join(", ") || "—"}
         </div>
         <div>
-          Selected: {audit.rouletteWinner.token} index {audit.rouletteIndex} via {audit.selectionMethod}
+          Selected: {audit.rouletteWinner.callerUsername} index {audit.rouletteIndex} via {audit.selectionMethod}
         </div>
         <div>Entropy: {audit.selectionEntropyHex || "—"}</div>
         <div>Selection committed: {audit.selectionCommittedAt}</div>

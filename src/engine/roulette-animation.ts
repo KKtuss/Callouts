@@ -3,6 +3,7 @@ import type { Callout } from "@/engine/types"
 
 export type RouletteFrame = {
   token: string
+  callerUsername: string
   calloutId: string
   delayMs: number
 }
@@ -29,6 +30,7 @@ export function buildRouletteFrames(
     const pick = visualPool[pickIndex(visualPool.length, random)]
     frames.push({
       token: pick.token,
+      callerUsername: pick.callerUsername,
       calloutId: pick.id,
       delayMs: frameDelayMs,
     })
@@ -36,6 +38,7 @@ export function buildRouletteFrames(
 
   frames.push({
     token: winner.token,
+    callerUsername: winner.callerUsername,
     calloutId: winner.id,
     delayMs: Math.round(frameDelayMs * 1.4),
   })

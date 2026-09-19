@@ -1,10 +1,12 @@
 import { randomBytes } from "node:crypto"
 import { nodeSecureRandom, pickIndex, type SecureRandom } from "@/lib/crypto-random"
-import type { CalloutCollector } from "@/engine/collector"
-import { selectRecipients } from "@/engine/selection"
+import { isValidToken, DuplicateCalloutError, callerKey, type CalloutCollector } from "@/engine/collector"
+import { selectRecipients, sortCallouts } from "@/engine/selection"
 import { buildRouletteFrames } from "@/engine/roulette-animation"
 import { EngineStore } from "@/engine/store"
 import { txPending, type Treasury } from "@/engine/treasury"
+import { resolveCalloutToken } from "@/lib/coin"
+import { canonicalToken, tokensMatch } from "@/lib/format"
 import type {
   Callout,
   DistributionTx,
@@ -18,6 +20,7 @@ import {
   distributionConfirmed,
   distributionPreparing,
   distributionSending,
+  qualifiedCaller,
   rouletteSelected,
   rouletteSpin,
   rouletteStart,
@@ -35,6 +38,20 @@ export type Clock = {
 export const realClock: Clock = {
   now: () => new Date(),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}
+
+function uniqueWindowCallouts(callouts: Callout[]): Callout[] {
+  const seenUsers = new Set<string>()
+  const seenWallets = new Set<string>()
+  const unique: Callout[] = []
+  for (const callout of sortCallouts(callouts)) {
+    const user = callerKey(callout.callerUsername)
+    if (seenUsers.has(user) || seenWallets.has(callout.wallet)) continue
+    seenUsers.add(user)
+    seenWallets.add(callout.wallet)
+    unique.push(callout)
+  }
+  return unique
 }
 
 export class SnapshotEngine {
@@ -79,37 +96,126 @@ export class SnapshotEngine {
     this.store.log("info", "Scheduler resumed.")
   }
 
+  setTreasuryPrivateKey(raw: string | null) {
+    this.treasury.setSecretKey(raw)
+    this.store.treasuryPublicAddress = this.treasury.publicAddress
+    this.store.config = {
+      ...this.store.config,
+      treasuryPublicAddress: this.treasury.publicAddress,
+    }
+    this.store.treasuryKeyConfigured = this.treasury.keyConfigured
+    this.store.log(
+      "info",
+      this.treasury.keyConfigured
+        ? "Treasury private key loaded. Public address updated from keypair."
+        : "Treasury private key cleared.",
+    )
+  }
+
   updateConfig(patch: Partial<EngineConfig>) {
     if (patch.allocationAmount !== undefined && patch.allocationAmount <= 0) {
       throw new Error("Allocation amount must be positive")
     }
+    if (patch.migrationBonusAmount !== undefined && patch.migrationBonusAmount <= 0) {
+      throw new Error("Migration bonus amount must be positive")
+    }
+    if (patch.migrationMinCallouts !== undefined && patch.migrationMinCallouts < 1) {
+      throw new Error("Migration minimum callouts must be at least 1")
+    }
     if (patch.snapshotMinMs !== undefined && patch.snapshotMinMs < 5_000) {
       throw new Error("Minimum snapshot interval is 5 seconds")
     }
-    if (
-      patch.snapshotMinMs !== undefined &&
-      patch.snapshotMaxMs !== undefined &&
-      patch.snapshotMaxMs < patch.snapshotMinMs
-    ) {
+    const nextMin = patch.snapshotMinMs ?? this.store.config.snapshotMinMs
+    const nextMax = patch.snapshotMaxMs ?? this.store.config.snapshotMaxMs
+    if (nextMax < nextMin) {
       throw new Error("Maximum interval must be >= minimum interval")
     }
+    if (patch.distributionToken !== undefined) {
+      if (this.store.config.coinMint) {
+        const { distributionToken: _locked, ...rest } = patch
+        patch = rest
+      } else if (!isValidToken(patch.distributionToken)) {
+        throw new Error("Invalid coin ticker")
+      } else {
+        patch = { ...patch, distributionToken: canonicalToken(patch.distributionToken) }
+      }
+    }
+    if (patch.coinMint !== undefined) {
+      const { coinMint: _mint, coinName: _name, ...rest } = patch
+      patch = rest
+    }
+    if (patch.treasuryPublicAddress !== undefined) {
+      const address = patch.treasuryPublicAddress.trim()
+      if (!address) throw new Error("Treasury address is required")
+      patch = { ...patch, treasuryPublicAddress: address }
+      this.treasury.publicAddress = address
+      this.store.treasuryPublicAddress = address
+    }
+    const timingChanged =
+      (patch.snapshotMinMs !== undefined && patch.snapshotMinMs !== this.store.config.snapshotMinMs) ||
+      (patch.snapshotMaxMs !== undefined && patch.snapshotMaxMs !== this.store.config.snapshotMaxMs)
     this.store.config = { ...this.store.config, ...patch }
-    this.store.emitState()
+    if (timingChanged && !this.store.schedulerPaused && !this.store.snapshotInProgress) {
+      this.armScheduler(this.randomDelay())
+    } else {
+      this.store.emitState()
+    }
   }
 
   ingestCallout(input: {
-    token: string
+    token?: string
     callerUsername: string
     wallet: string
     source?: string
+    capturedAt?: string
+    id?: string
+    thesis?: string
   }): Callout {
     const source = input.source ?? "private-ingest"
     if (!this.store.config.calloutSources.includes(source)) {
       throw new Error("Unknown callout source. Sources are configured privately.")
     }
-    const callout = this.collector.ingest({ ...input, source })
+    const token = resolveCalloutToken(input.token, this.store.config)
+    const windowStart = new Date(this.store.lastSnapshotAt ?? this.store.startedAt)
+    const { callout, duplicate } = this.collector.ingestUnique(
+      {
+        token,
+        callerUsername: input.callerUsername,
+        wallet: input.wallet,
+        source,
+        capturedAt: input.capturedAt,
+        id: input.id,
+        thesis: input.thesis,
+      },
+      windowStart,
+    )
+    if (duplicate) {
+      throw new DuplicateCalloutError(callout)
+    }
     this.store.emitState()
+    this.notifyQualified(callout)
     return callout
+  }
+
+  private notifyQualified(callout: Callout) {
+    if (this.store.snapshotInProgress) return
+    const windowStartIso = this.store.lastSnapshotAt ?? this.store.startedAt
+    if (callout.capturedAt < windowStartIso) return
+    const windowStart = new Date(windowStartIso)
+    const windowCount = uniqueWindowCallouts(
+      this.collector
+        .captureWindow(windowStart, this.clock.now())
+        .filter((row) => tokensMatch(row.token, this.config.distributionToken)),
+    ).length
+    const explorer = {
+      txTemplate: this.config.explorerTxTemplate,
+      addressTemplate: this.config.explorerAddressTemplate,
+    }
+    void this.broadcast
+      .send(qualifiedCaller({ callout, windowCount, explorer }))
+      .catch((error) => {
+        this.store.log("warn", error instanceof Error ? error.message : "Qualified notice failed")
+      })
   }
 
   async runSnapshot(trigger: SnapshotTrigger = "admin"): Promise<SnapshotAudit | null> {
@@ -124,7 +230,11 @@ export class SnapshotEngine {
     const snapshotTimestamp = this.clock.now()
     const previous = this.store.lastSnapshotAt
     const windowStart = new Date(previous ?? this.store.startedAt)
-    const callouts = this.collector.captureWindow(windowStart, snapshotTimestamp)
+    const callouts = uniqueWindowCallouts(
+      this.collector
+        .captureWindow(windowStart, snapshotTimestamp)
+        .filter((callout) => tokensMatch(callout.token, this.config.distributionToken)),
+    )
 
     if (callouts.length === 0) {
       const skipped = this.emptyAudit(trigger, snapshotTimestamp, windowStart)
@@ -202,7 +312,7 @@ export class SnapshotEngine {
 
     for (const frame of frames) {
       await this.clock.sleep(frame.delayMs)
-      await this.broadcast.edit(rouletteMsg.id, rouletteSpin(frame.token))
+      await this.broadcast.edit(rouletteMsg.id, rouletteSpin(frame.callerUsername))
     }
 
     await this.clock.sleep(Math.round(cfg.rouletteFrameMs * 1.2))

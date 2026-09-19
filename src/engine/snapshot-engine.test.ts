@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { CalloutCollector } from "@/engine/collector"
+import { CalloutCollector, DuplicateCalloutError } from "@/engine/collector"
 import { SnapshotEngine, type Clock } from "@/engine/snapshot-engine"
 import { DEFAULT_CONFIG, EngineStore } from "@/engine/store"
 import { MockTreasury } from "@/engine/treasury"
@@ -58,7 +58,7 @@ function seed(collector: CalloutCollector) {
   const rows: Callout[] = [
     {
       id: "a",
-      token: "$TOKEN_A",
+      token: "$BONK",
       callerUsername: "@caller_a",
       wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
       capturedAt: "2026-09-19T17:02:00.000Z",
@@ -66,7 +66,7 @@ function seed(collector: CalloutCollector) {
     },
     {
       id: "b",
-      token: "$TOKEN_B",
+      token: "$BONK",
       callerUsername: "@caller_b",
       wallet: "8yKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
       capturedAt: "2026-09-19T17:08:00.000Z",
@@ -74,7 +74,7 @@ function seed(collector: CalloutCollector) {
     },
     {
       id: "c",
-      token: "$TOKEN_C",
+      token: "$BONK",
       callerUsername: "@caller_c",
       wallet: "9zKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
       capturedAt: "2026-09-19T17:11:00.000Z",
@@ -82,7 +82,7 @@ function seed(collector: CalloutCollector) {
     },
     {
       id: "d",
-      token: "$TOKEN_D",
+      token: "$BONK",
       callerUsername: "@caller_d",
       wallet: "4LmXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
       capturedAt: "2026-09-19T17:12:30.000Z",
@@ -127,7 +127,8 @@ describe("SnapshotEngine broadcast lifecycle", () => {
 
     expect(audit.selectionMethod).toBe("node:crypto.randomInt")
     expect(audit.selectionEntropyHex).toHaveLength(64)
-    expect(audit.lastCallout.token).toBe("$TOKEN_D")
+    expect(audit.lastCallout.token).toBe("$BONK")
+    expect(audit.lastCallout.callerUsername).toBe("@caller_d")
     expect(audit.rouletteWinner.id).not.toBe(audit.lastCallout.id)
     expect(new Date(audit.selectionCommittedAt).getTime()).toBeLessThanOrEqual(
       new Date(audit.animationStartedAt!).getTime(),
@@ -143,8 +144,8 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     expect(kinds.some((kind) => kind === "edit:roulette")).toBe(true)
 
     const selected = broadcast.sequence.find((item) => item.text.includes("SELECTED"))
-    expect(selected?.text).toContain(audit.rouletteWinner.token)
     expect(selected?.text).toContain(audit.rouletteWinner.callerUsername)
+    expect(selected?.text).toContain("$BONK")
 
     const final = broadcast.sequence.find((item) => item.kind === "final")
     expect(final?.text).toContain("Last Callout")
@@ -186,5 +187,244 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     const audit = await engine.runSnapshot("scheduler")
     expect(audit?.confirmationStatus).toBe("skipped")
     expect(broadcast.sequence).toHaveLength(0)
+  })
+
+  it("rejects callouts for any coin other than the configured token", async () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      "2026-09-19T17:00:00.000Z",
+    )
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+
+    expect(() =>
+      engine.ingestCallout({
+        token: "$WIF",
+        callerUsername: "alpha",
+        wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        source: "private-ingest",
+      }),
+    ).toThrow(/only \$BONK/i)
+
+    const accepted = engine.ingestCallout({
+      callerUsername: "alpha",
+      wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      source: "private-ingest",
+    })
+    expect(accepted.token).toBe("$BONK")
+  })
+
+  it("ignores other-coin callouts already sitting in the collector", async () => {
+    const collector = new CalloutCollector()
+    collector.ingest({
+      id: "foreign",
+      token: "$WIF",
+      callerUsername: "@intruder",
+      wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      capturedAt: "2026-09-19T17:02:00.000Z",
+      source: "demo-feed",
+    })
+    collector.ingest({
+      id: "home",
+      token: "$BONK",
+      callerUsername: "@keeper",
+      wallet: "8yKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      capturedAt: "2026-09-19T17:03:00.000Z",
+      source: "demo-feed",
+    })
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      {
+        ...DEFAULT_CONFIG,
+        startupSnapshotDelayMs: null,
+        rouletteFrameCount: 2,
+        rouletteFrameMs: 1,
+        mockTxDelayMs: 0,
+        feederEnabled: false,
+      },
+      "2026-09-19T17:00:00.000Z",
+    )
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([0, 0, 0, 0]),
+    )
+
+    const audit = await engine.runSnapshot("admin")
+    expect(audit?.calloutCount).toBe(1)
+    expect(audit?.lastCallout.id).toBe("home")
+    expect(audit?.lastCallout.token).toBe("$BONK")
+  })
+
+  it("accepts the configured mint address as the same coin", async () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      {
+        ...DEFAULT_CONFIG,
+        distributionToken: "AIDEN",
+        coinMint: "4i5FqkfYDAPcEVcXyuVyaaBcz3bpwJPqDkmaF36kpump",
+        coinName: "The Day Trader",
+        startupSnapshotDelayMs: null,
+        feederEnabled: false,
+      },
+      "2026-09-19T17:00:00.000Z",
+    )
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+
+    const accepted = engine.ingestCallout({
+      token: "4i5FqkfYDAPcEVcXyuVyaaBcz3bpwJPqDkmaF36kpump",
+      callerUsername: "alpha",
+      wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      source: "private-ingest",
+    })
+    expect(accepted.token).toBe("$AIDEN")
+    expect(() =>
+      engine.ingestCallout({
+        token: "$BONK",
+        callerUsername: "alpha",
+        wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        source: "private-ingest",
+      }),
+    ).toThrow(/only \$AIDEN/i)
+  })
+
+  it("stores one callout per caller then pays last plus a random unique caller", async () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      {
+        ...DEFAULT_CONFIG,
+        distributionToken: "AIDEN",
+        coinMint: "4i5FqkfYDAPcEVcXyuVyaaBcz3bpwJPqDkmaF36kpump",
+        startupSnapshotDelayMs: null,
+        rouletteFrameCount: 2,
+        rouletteFrameMs: 1,
+        mockTxDelayMs: 0,
+        feederEnabled: false,
+      },
+      "2026-09-19T17:00:00.000Z",
+    )
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([0, 0, 0, 0]),
+    )
+    const wallets = [
+      "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      "8yKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      "9zKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    ]
+
+    engine.ingestCallout({
+      callerUsername: "alpha",
+      wallet: wallets[0],
+      source: "pump-fun",
+      capturedAt: "2026-09-19T17:01:00.000Z",
+    })
+    expect(() =>
+      engine.ingestCallout({
+        callerUsername: "alpha",
+        wallet: wallets[0],
+        source: "pump-fun",
+        capturedAt: "2026-09-19T17:02:00.000Z",
+      }),
+    ).toThrow(DuplicateCalloutError)
+    engine.ingestCallout({
+      callerUsername: "beta",
+      wallet: wallets[1],
+      source: "pump-fun",
+      capturedAt: "2026-09-19T17:08:00.000Z",
+    })
+    engine.ingestCallout({
+      callerUsername: "gamma",
+      wallet: wallets[2],
+      source: "pump-fun",
+      capturedAt: "2026-09-19T17:12:00.000Z",
+    })
+
+    const audit = await engine.runSnapshot("admin")
+    expect(audit?.calloutCount).toBe(3)
+    expect(audit?.lastCallout.callerUsername).toBe("@gamma")
+    expect(audit?.rouletteWinner.callerUsername).toBe("@alpha")
+    expect(audit?.transactions).toHaveLength(2)
+    expect(audit?.transactions.map((tx) => tx.kind)).toEqual(["last_callout", "roulette"])
+    expect(audit?.transactions.every((tx) => tx.status === "confirmed")).toBe(true)
+  })
+
+  it("notifies the channel for each new unique caller in the current snapshot window", () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      "2026-09-19T17:00:00.000Z",
+    )
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+    const walletA = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+    const walletB = "8yKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+
+    engine.ingestCallout({
+      callerUsername: "alpha",
+      wallet: walletA,
+      source: "private-ingest",
+      capturedAt: "2026-09-19T17:01:00.000Z",
+    })
+    expect(() =>
+      engine.ingestCallout({
+        callerUsername: "alpha",
+        wallet: walletA,
+        source: "private-ingest",
+        capturedAt: "2026-09-19T17:02:00.000Z",
+      }),
+    ).toThrow(DuplicateCalloutError)
+    engine.ingestCallout({
+      callerUsername: "beta",
+      wallet: walletB,
+      source: "private-ingest",
+      capturedAt: "2026-09-19T16:50:00.000Z",
+    })
+
+    const qualified = broadcast.sequence.filter((item) => item.kind === "qualified")
+    expect(qualified).toHaveLength(1)
+    expect(qualified[0].text).toContain("@alpha")
+    expect(qualified[0].text).toContain("Eligible this snapshot: 1")
   })
 })

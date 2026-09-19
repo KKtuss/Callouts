@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react"
 import type { ChannelMessage } from "@/engine/types"
-import { formatClockIso } from "@/lib/format"
+import { formatClockIso, displayToken } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
 function renderText(text: string) {
@@ -20,7 +20,7 @@ function renderText(text: string) {
             </code>
           )
         }
-        if (/^[📸🎰⏳✅🥇💰🔄🎯❌]/.test(chunk)) {
+        if (/^[📸🎰⏳✅🥇💰🔄🎯❌🧬🚀]/.test(chunk)) {
           return (
             <span key={i} className="font-medium text-white">
               {chunk}
@@ -37,10 +37,12 @@ export function ChannelPreview({
   messages,
   telegramConnected,
   channelId,
+  coin,
 }: {
   messages: ChannelMessage[]
   telegramConnected: boolean
   channelId: string | null
+  coin: string
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const stickToBottom = useRef(true)
@@ -60,7 +62,9 @@ export function ChannelPreview({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h2 className="truncate text-[15px] font-semibold text-white">SNAPSHOTS</h2>
+            <h2 className="truncate text-[15px] font-semibold text-white">
+              {displayToken(coin)} SNAPSHOTS
+            </h2>
             <span className="rounded-full bg-sky-500/20 px-2 py-0.5 text-[10px] font-medium tracking-wide text-sky-300 uppercase">
               Broadcast
             </span>

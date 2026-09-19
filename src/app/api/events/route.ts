@@ -9,8 +9,27 @@ export async function GET(request: Request) {
 
   const stream = new ReadableStream({
     start(controller) {
+      let closed = false
+
+      const close = () => {
+        if (closed) return
+        closed = true
+        clearInterval(keepalive)
+        unsubscribe()
+        try {
+          controller.close()
+        } catch {
+          /* already closed */
+        }
+      }
+
       const send = (data: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        if (closed) return
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        } catch {
+          close()
+        }
       }
 
       send(store.clientState())
@@ -19,16 +38,15 @@ export async function GET(request: Request) {
       })
 
       const keepalive = setInterval(() => {
-        controller.enqueue(encoder.encode(`: keepalive\n\n`))
+        if (closed) return
+        try {
+          controller.enqueue(encoder.encode(`: keepalive\n\n`))
+        } catch {
+          close()
+        }
       }, 15_000)
 
-      const abort = () => {
-        clearInterval(keepalive)
-        unsubscribe()
-        controller.close()
-      }
-
-      request.signal.addEventListener("abort", abort)
+      request.signal.addEventListener("abort", close)
     },
   })
 

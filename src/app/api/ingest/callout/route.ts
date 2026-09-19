@@ -1,3 +1,4 @@
+import { DuplicateCalloutError, isDuplicateCalloutError } from "@/engine/collector"
 import { requireAdmin } from "@/lib/admin-auth"
 import { getRuntime } from "@/engine/runtime"
 
@@ -16,13 +17,19 @@ export async function POST(request: Request) {
 
   try {
     const callout = getRuntime().engine.ingestCallout({
-      token: body.token ?? "",
+      token: body.token,
       callerUsername: body.callerUsername ?? "",
       wallet: body.wallet ?? "",
       source: body.source,
     })
     return Response.json({ callout, state: getRuntime().store.clientState() })
   } catch (error) {
+    if (isDuplicateCalloutError(error)) {
+      return Response.json(
+        { error: error.message, callout: error.existing },
+        { status: 409 },
+      )
+    }
     return Response.json(
       { error: error instanceof Error ? error.message : "Invalid callout" },
       { status: 400 },
