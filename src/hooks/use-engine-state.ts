@@ -1,16 +1,17 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { ClientState } from "@/engine/types"
 
 export function useEngineState(initialState: ClientState | null = null) {
   const [state, setState] = useState<ClientState | null>(initialState)
   const [error, setError] = useState<string | null>(null)
+  const firstPaint = useRef(initialState)
 
   useEffect(() => {
     let source: EventSource | null = null
     let cancelled = false
-    let hasState = Boolean(initialState)
+    let hasState = Boolean(firstPaint.current)
 
     const connect = async () => {
       try {
@@ -51,7 +52,7 @@ export function useEngineState(initialState: ClientState | null = null) {
       cancelled = true
       source?.close()
     }
-  }, [initialState])
+  }, [])
 
   return { state, error }
 }

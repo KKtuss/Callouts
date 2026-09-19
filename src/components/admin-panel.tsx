@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useSyncExternalStore, type ReactNode } from "react"
+import { getClockSnapshot, getServerClockSnapshot, subscribeClock } from "@/lib/clock"
 import {
   Camera,
   Dices,
@@ -43,14 +44,7 @@ function phaseCopy(state: ClientState): string {
 }
 
 function useCountdown(iso: string | null, paused: boolean) {
-  const now = useSyncExternalStore(
-    (onStoreChange) => {
-      const id = setInterval(onStoreChange, 1000)
-      return () => clearInterval(id)
-    },
-    () => Date.now(),
-    () => 0,
-  )
+  const now = useSyncExternalStore(subscribeClock, getClockSnapshot, getServerClockSnapshot)
   if (paused || !iso) return "—"
   if (now === 0) return "…"
   const delta = Date.parse(iso) - now
