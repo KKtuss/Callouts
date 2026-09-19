@@ -42,11 +42,15 @@ export function ChannelPreview({
   telegramConnected: boolean
   channelId: string | null
 }) {
-  const endRef = useRef<HTMLDivElement>(null)
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const stickToBottom = useRef(true)
+  const fingerprint = messages.map((message) => `${message.id}:${message.editCount}`).join("|")
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
-  }, [messages])
+    const scroller = scrollerRef.current
+    if (!scroller || !stickToBottom.current) return
+    scroller.scrollTop = scroller.scrollHeight
+  }, [fingerprint])
 
   return (
     <section className="flex min-h-[640px] flex-1 flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[#17212b] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
@@ -69,7 +73,16 @@ export function ChannelPreview({
         </div>
       </header>
 
-      <div className="relative flex-1 overflow-y-auto bg-[#0e1621] px-3 py-4">
+      <div
+        ref={scrollerRef}
+        onScroll={() => {
+          const scroller = scrollerRef.current
+          if (!scroller) return
+          const remaining = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
+          stickToBottom.current = remaining < 96
+        }}
+        className="relative flex-1 overflow-y-auto [overflow-anchor:none] bg-[#0e1621] px-3 py-4"
+      >
         <div className="mx-auto mb-4 max-w-sm rounded-2xl bg-[#182533] px-4 py-3 text-center text-[11px] leading-relaxed text-white/45">
           Viewers can only watch automated snapshot results. Commands, replies, and wallet
           requests are disabled on this channel.
@@ -103,7 +116,6 @@ export function ChannelPreview({
             ))}
           </div>
         )}
-        <div ref={endRef} />
       </div>
 
       <div className="border-t border-white/5 bg-[#17212b] px-4 py-3">
