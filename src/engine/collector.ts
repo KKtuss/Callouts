@@ -6,7 +6,7 @@ import type { Callout } from "@/engine/types"
 const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,45}$/
 
 export function isValidWallet(wallet: string): boolean {
-  return /^[1-9A-HJ-NP-Za-km-z]{32,45}$/.test(wallet.trim())
+  return SOLANA_RE.test(wallet.trim())
 }
 
 export function isValidToken(token: string): boolean {
