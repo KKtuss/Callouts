@@ -3,11 +3,24 @@ export function pad2(n: number): string {
 }
 
 export function formatClock(date: Date): string {
-  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+  return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}`
+}
+
+export function formatClockIso(iso: string): string {
+  return formatClock(new Date(iso))
+}
+
+export function formatDateTimeIso(iso: string): string {
+  const date = new Date(iso)
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())} ${formatClock(date)} UTC`
+}
+
+export function formatInteger(value: number): string {
+  return value.toLocaleString("en-US")
 }
 
 export function formatSnapshotWindow(start: Date, end: Date): string {
-  return `${formatClock(start)} → ${formatClock(end)}`
+  return `${formatClock(start)} → ${formatClock(end)} UTC`
 }
 
 export function truncateWallet(wallet: string, head = 3, tail = 3): string {

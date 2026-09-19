@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react"
 import type { ChannelMessage } from "@/engine/types"
+import { formatClockIso } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
 function renderText(text: string) {
@@ -93,10 +94,7 @@ export function ChannelPreview({
                   <div className="mt-1.5 flex items-center justify-end gap-1 text-[10px] text-white/35">
                     {message.editCount > 0 ? <span>edited</span> : null}
                     <span>
-                      {new Date(message.editedAt ?? message.createdAt).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
+                      {formatClockIso(message.editedAt ?? message.createdAt)}
                     </span>
                     <span className="text-sky-400/80">✓✓</span>
                   </div>

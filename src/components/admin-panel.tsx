@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, type ReactNode } from "react"
+import { useState, useSyncExternalStore, type ReactNode } from "react"
 import {
   Camera,
   Dices,
@@ -19,7 +19,7 @@ import { Separator } from "@/components/ui/separator"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import type { ClientState, EngineConfig, SnapshotAudit } from "@/engine/types"
-import { truncateWallet } from "@/lib/format"
+import { formatClockIso, formatDateTimeIso, formatInteger, truncateWallet } from "@/lib/format"
 
 function phaseCopy(state: ClientState): string {
   if (state.status.snapshotInProgress) {
@@ -43,12 +43,16 @@ function phaseCopy(state: ClientState): string {
 }
 
 function useCountdown(iso: string | null, paused: boolean) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [])
+  const now = useSyncExternalStore(
+    (onStoreChange) => {
+      const id = setInterval(onStoreChange, 1000)
+      return () => clearInterval(id)
+    },
+    () => Date.now(),
+    () => 0,
+  )
   if (paused || !iso) return "—"
+  if (now === 0) return "…"
   const delta = Date.parse(iso) - now
   if (delta <= 0) return "imminent"
   const total = Math.ceil(delta / 1000)
@@ -126,7 +130,7 @@ export function AdminPanel({ state }: { state: ClientState }) {
           />
           <Metric
             label="Treasury"
-            value={`${state.status.treasuryBalance.toLocaleString()} ${state.status.config.distributionToken}`}
+            value={`${formatInteger(state.status.treasuryBalance)} ${state.status.config.distributionToken}`}
             hint="Public address only"
           />
         </CardContent>
@@ -229,7 +233,7 @@ export function AdminPanel({ state }: { state: ClientState }) {
                         </div>
                       </div>
                       <span className="text-[11px] text-muted-foreground">
-                        {new Date(callout.capturedAt).toLocaleTimeString()}
+                        {formatClockIso(callout.capturedAt)}
                       </span>
                     </div>
                   ))
@@ -308,7 +312,7 @@ export function AdminPanel({ state }: { state: ClientState }) {
                 {state.status.treasuryPublicAddress}
               </div>
               <p className="text-sm text-muted-foreground">
-                Balance {state.status.treasuryBalance.toLocaleString()}{" "}
+                Balance {formatInteger(state.status.treasuryBalance)}{" "}
                 {state.status.config.distributionToken}. Demo mode mocks Solana confirmations and
                 still emits explorer links for the public trail.
               </p>
@@ -366,7 +370,7 @@ function AuditCard({ audit }: { audit: SnapshotAudit }) {
     <details className="rounded-xl border border-white/10 px-3 py-2">
       <summary className="cursor-pointer list-none">
         <div className="flex items-center justify-between gap-2">
-          <span className="font-mono text-xs">{new Date(audit.snapshotTimestamp).toLocaleString()}</span>
+          <span className="font-mono text-xs">{formatDateTimeIso(audit.snapshotTimestamp)}</span>
           <Badge variant={audit.confirmationStatus === "confirmed" ? "default" : "secondary"}>
             {audit.confirmationStatus}
           </Badge>
