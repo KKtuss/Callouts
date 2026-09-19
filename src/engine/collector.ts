@@ -3,10 +3,10 @@ import { encodeBase58 } from "@/lib/base58"
 import { displayToken, displayUsername } from "@/lib/format"
 import type { Callout } from "@/engine/types"
 
-const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
+const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,45}$/
 
 export function isValidWallet(wallet: string): boolean {
-  return SOLANA_RE.test(wallet.trim())
+  return /^[1-9A-HJ-NP-Za-km-z]{32,45}$/.test(wallet.trim())
 }
 
 export function isValidToken(token: string): boolean {
@@ -19,7 +19,11 @@ export function isValidCaller(username: string): boolean {
 }
 
 export function generateWallet(): string {
-  return encodeBase58(randomBytes(32))
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const wallet = encodeBase58(randomBytes(32))
+    if (isValidWallet(wallet)) return wallet
+  }
+  throw new Error("Failed to generate a valid demo wallet")
 }
 
 export function normalizeCallout(input: {
