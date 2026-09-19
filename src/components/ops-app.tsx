@@ -3,9 +3,10 @@
 import { AdminPanel } from "@/components/admin-panel"
 import { ChannelPreview } from "@/components/channel-preview"
 import { useEngineState } from "@/hooks/use-engine-state"
+import type { ClientState } from "@/engine/types"
 
-export function OpsApp() {
-  const { state, error } = useEngineState()
+export function OpsApp({ initialState }: { initialState: ClientState | null }) {
+  const { state, error } = useEngineState(initialState)
 
   if (!state) {
     return (

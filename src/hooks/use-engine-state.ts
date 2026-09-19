@@ -3,31 +3,36 @@
 import { useEffect, useState } from "react"
 import type { ClientState } from "@/engine/types"
 
-export function useEngineState() {
-  const [state, setState] = useState<ClientState | null>(null)
+export function useEngineState(initialState: ClientState | null = null) {
+  const [state, setState] = useState<ClientState | null>(initialState)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let source: EventSource | null = null
     let cancelled = false
+    let hasState = Boolean(initialState)
 
     const connect = async () => {
       try {
-        const response = await fetch("/api/state")
+        const response = await fetch("/api/state", { cache: "no-store" })
         if (!response.ok) throw new Error("Failed to load engine state")
-        const initial = (await response.json()) as ClientState
+        const next = (await response.json()) as ClientState
         if (!cancelled) {
-          setState(initial)
+          hasState = true
+          setState(next)
           setError(null)
         }
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Engine unreachable")
+        if (!cancelled && !hasState) {
+          setError(err instanceof Error ? err.message : "Engine unreachable")
+        }
       }
 
       source = new EventSource("/api/events")
       source.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data) as ClientState
+          hasState = true
           setState(payload)
           setError(null)
         } catch {
@@ -35,7 +40,9 @@ export function useEngineState() {
         }
       }
       source.onerror = () => {
-        setError("Live updates interrupted. Reconnecting…")
+        if (!cancelled && !hasState) {
+          setError("Live updates interrupted. Reconnecting…")
+        }
       }
     }
 
@@ -44,7 +51,7 @@ export function useEngineState() {
       cancelled = true
       source?.close()
     }
-  }, [])
+  }, [initialState])
 
   return { state, error }
 }
