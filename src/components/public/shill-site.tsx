@@ -68,17 +68,6 @@ function useNow() {
   return useSyncExternalStore(subscribeClock, getClockSnapshot, getServerClockSnapshot)
 }
 
-function useCountdown(iso: string | null, paused: boolean) {
-  const now = useNow()
-  if (paused) return "paused"
-  if (!iso) return "—"
-  if (now === 0) return "…"
-  const delta = Date.parse(iso) - now
-  if (delta <= 0) return "any moment"
-  const total = Math.ceil(delta / 1000)
-  return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, "0")}`
-}
-
 /** Milliseconds since `iso`, or null before the clock has started on the client. */
 function useElapsed(iso: string | null) {
   const now = useNow()
@@ -199,10 +188,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function CounterBar({ state }: { state: PublicView | null }) {
   const since = useElapsed(state?.engine.lastSnapshotAt ?? state?.engine.startedAt ?? null)
   const hasSnapshot = Boolean(state?.engine.lastSnapshotAt)
-  const countdown = useCountdown(
-    state?.engine.nextSnapshotAt ?? null,
-    Boolean(state?.engine.paused),
-  )
   const ticker = state?.allocation.distributionToken ?? "SHILL"
   const totals = state?.totals
 
@@ -211,7 +196,7 @@ function CounterBar({ state }: { state: PublicView | null }) {
       <Metric
         label="Time since last snapshot"
         value={since === null ? "—" : formatElapsed(since)}
-        caption={hasSnapshot ? "counting to the next one" : "waiting for the first snapshot"}
+        caption={hasSnapshot ? "last settled round" : "waiting for the first snapshot"}
         accent
       />
       <Metric
@@ -235,9 +220,11 @@ function CounterBar({ state }: { state: PublicView | null }) {
         caption="creator rewards claimed and paid"
       />
       <Metric
-        label="Next snapshot"
-        value={countdown}
-        caption={state ? `random, every ${state.engine.nextSnapshotRangeLabel}` : "—"}
+        label="Total callouts"
+        value={<AnimatedNumber value={totals?.callouts ?? 0} format={formatInteger} />}
+        caption={
+          state ? `random snapshots every ${state.engine.nextSnapshotRangeLabel}` : "—"
+        }
       />
     </div>
   )
@@ -246,14 +233,14 @@ function CounterBar({ state }: { state: PublicView | null }) {
 function LiveBoard({ state, error }: { state: PublicView | null; error: string | null }) {
   if (!state) {
     return (
-      <Panel>
+      <Panel className="flex flex-col lg:h-full lg:min-h-[var(--rounds-feed-h)]">
         <p className="text-sm text-shill-deep/65">{error ?? "Connecting to the engine…"}</p>
       </Panel>
     )
   }
 
   return (
-    <Panel>
+    <Panel className="flex flex-col lg:h-full lg:min-h-[var(--rounds-feed-h)]">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.2em] text-shill-deep uppercase">
           <span
@@ -326,23 +313,25 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
 
       <div className="aqua-rule mt-6" />
 
-      <div className="mt-5">
+      <div className="mt-5 flex min-h-0 flex-1 flex-col">
         <div className="text-[10px] font-semibold tracking-[0.18em] text-shill-deep/45 uppercase">
           Callers in this window
         </div>
         {state.windowCallouts.length === 0 ? (
           <p className="mt-2 text-sm text-shill-deep/55">No callouts captured yet this window.</p>
         ) : (
-          <div className="mt-2.5 flex flex-wrap gap-2">
-            {state.windowCallouts.slice(-12).map((c) => (
-              <span
-                key={c.id}
-                className="voice-chip aqua-chip max-w-full truncate rounded-full px-3 py-1.5 text-xs font-semibold text-shill-deep"
-                title={c.wallet}
-              >
-                {c.username}
-              </span>
-            ))}
+          <div className="aqua-scroll mt-2.5 min-h-[6.75rem] flex-1 overflow-y-auto overscroll-contain">
+            <div className="flex flex-wrap content-start gap-2">
+              {state.windowCallouts.map((c) => (
+                <span
+                  key={c.id}
+                  className="voice-chip aqua-chip max-w-full truncate rounded-full px-3 py-1.5 text-xs font-semibold text-shill-deep"
+                  title={c.wallet}
+                >
+                  {c.username}
+                </span>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -353,7 +342,7 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
 function RoundRow({ round }: { round: PublicRound }) {
   const explorer = round.explorerLinks[0]
   return (
-    <article className="aqua-panel panel-reveal rounded-2xl px-5 py-4">
+    <article className="round-card rounded-2xl px-5 py-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="text-xs font-semibold tracking-[0.18em] text-primary uppercase">
           Snapshot #{round.number}
@@ -411,7 +400,7 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
   const root = useRef<HTMLDivElement>(null)
 
   const rounds = useMemo(
-    () => state?.rounds.filter((r) => r.calloutCount > 0).slice(0, 4) ?? [],
+    () => state?.rounds.filter((r) => r.calloutCount > 0) ?? [],
     [state?.rounds],
   )
 
@@ -489,8 +478,8 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
       if (chips.length === 0) return
       gsap.fromTo(
         chips.slice(-3),
-        { opacity: 0, y: 8, scale: 0.94 },
-        { opacity: 1, y: 0, scale: 1, duration: 0.4, ease: "power2.out", stagger: 0.05 },
+        { opacity: 0, y: 6 },
+        { opacity: 1, y: 0, duration: 0.35, ease: "power2.out", stagger: 0.04 },
       )
     },
     { scope: root, dependencies: [state?.windowCallouts.length ?? 0] },
@@ -769,10 +758,10 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
               </p>
             </div>
 
-            <div className="mt-8 grid gap-5 lg:grid-cols-[1.15fr_1fr]">
+            <div className="live-board-grid mt-8 grid items-stretch gap-5 lg:grid-cols-[1.15fr_1fr]">
               <LiveBoard state={state} error={error} />
 
-              <div className="space-y-4">
+              <div className="rounds-scroll aqua-scroll space-y-4 overflow-y-auto overscroll-contain">
                 {state && rounds.length === 0 ? (
                   <Panel>
                     <p className="text-sm text-shill-deep/60">

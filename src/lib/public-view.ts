@@ -95,7 +95,6 @@ export type PublicView = {
     snapshotInProgress: boolean
     startedAt: string
     lastSnapshotAt: string | null
-    nextSnapshotAt: string | null
     nextSnapshotRangeLabel: string
     calloutsInWindow: number
     lastPayoutAt: string | null
@@ -124,6 +123,7 @@ export type PublicView = {
   totals: RewardTotals & {
     snapshots: number
     roundsSettled: number
+    callouts: number
   }
   bonding: {
     watchStartedAt: string | null
@@ -321,7 +321,6 @@ export function toPublicView(state: ClientState): PublicView {
       snapshotInProgress: state.status.snapshotInProgress,
       startedAt: state.status.startedAt,
       lastSnapshotAt: state.status.lastSnapshotAt,
-      nextSnapshotAt: state.status.nextSnapshotAt,
       nextSnapshotRangeLabel: state.status.nextSnapshotRangeLabel,
       calloutsInWindow: state.status.calloutsInWindow,
       lastPayoutAt,
@@ -359,6 +358,7 @@ export function toPublicView(state: ClientState): PublicView {
       roundsSettled: state.audits.filter(
         (a) => a.confirmationStatus === "confirmed" || a.confirmationStatus === "partial_failure",
       ).length,
+      callouts: state.callouts.length,
     },
     bonding: {
       watchStartedAt: state.status.migration?.watchStartedAt ?? null,

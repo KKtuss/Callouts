@@ -16,11 +16,11 @@ export const metadata: Metadata = {
   openGraph: {
     title: "SHILL",
     description: "Call it. Get noticed. Get paid.",
-    images: [{ url: "/brand/logo.png", width: 852, height: 715 }],
+    images: [{ url: "/brand/logo.png?v=3", width: 1200, height: 1200 }],
   },
   icons: {
-    icon: "/brand/logo.png",
-    apple: "/brand/logo.png",
+    icon: [{ url: "/brand/favicon.png?v=3", type: "image/png" }],
+    apple: [{ url: "/brand/apple-touch-icon.png?v=3", type: "image/png" }],
   },
 }
 
