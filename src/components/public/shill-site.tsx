@@ -153,19 +153,21 @@ function Metric({
 }) {
   return (
     <div className="min-w-0">
-      <div className="text-[10px] font-semibold tracking-[0.2em] text-shill-deep/50 uppercase">
+      <div className="text-[10px] font-semibold tracking-[0.16em] text-shill-deep/50 uppercase sm:tracking-[0.2em]">
         {label}
       </div>
       <div
         className={cn(
-          "mt-1.5 truncate text-xl font-semibold tabular-nums sm:text-2xl",
+          "mt-1.5 text-lg font-semibold break-words tabular-nums sm:truncate sm:text-2xl",
           accent ? "text-primary" : "text-shill-deep",
         )}
       >
         {value}
       </div>
       {caption ? (
-        <div className="mt-1 truncate text-xs font-medium text-shill-deep/55">{caption}</div>
+        <div className="mt-1 text-xs font-medium leading-snug text-shill-deep/55 sm:truncate">
+          {caption}
+        </div>
       ) : null}
     </div>
   )
@@ -177,7 +179,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="text-[10px] font-semibold tracking-[0.18em] text-shill-deep/45 uppercase">
         {label}
       </div>
-      <div className="mt-1 truncate text-sm font-semibold text-shill-deep tabular-nums">
+      <div className="mt-1 text-sm font-semibold break-words text-shill-deep tabular-nums sm:truncate">
         {children}
       </div>
     </div>
@@ -192,7 +194,7 @@ function CounterBar({ state }: { state: PublicView | null }) {
   const totals = state?.totals
 
   return (
-    <div className="aqua-panel panel-reveal grid grid-cols-2 gap-x-6 gap-y-6 rounded-3xl px-6 py-6 sm:grid-cols-4 sm:px-8">
+    <div className="aqua-panel panel-reveal grid grid-cols-1 gap-5 rounded-3xl px-5 py-5 sm:grid-cols-2 sm:gap-x-6 sm:gap-y-6 sm:px-8 sm:py-6 lg:grid-cols-4">
       <Metric
         label="Time since last snapshot"
         value={since === null ? "—" : formatElapsed(since)}
@@ -241,7 +243,7 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
 
   return (
     <Panel className="flex flex-col lg:h-full lg:min-h-[var(--rounds-feed-h)]">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3">
         <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.2em] text-shill-deep uppercase">
           <span
             className={cn(
@@ -258,7 +260,7 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
         </span>
       </div>
 
-      <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+      <div className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3.5 sm:grid-cols-3 sm:gap-x-6 sm:gap-y-4">
         <Field label="Mint">
           {state.mint.address ? (
             <WalletAddress
@@ -290,7 +292,7 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
         <Field label="Treasury">
           {state.treasury.address ? (
             <span className="flex min-w-0 flex-col">
-              <span>{state.treasury.balanceLabel}</span>
+              <span className="break-words">{state.treasury.balanceLabel}</span>
               <WalletAddress
                 address={state.treasury.address}
                 short={state.treasury.addressShort}
@@ -302,13 +304,15 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
             state.treasury.balanceLabel
           )}
         </Field>
-        <Field label="Bonding curve">
-          {state.bonding.bonded
-            ? "Bonded"
-            : state.bonding.progressPercent !== null
-              ? `${state.bonding.progressPercent}% · ${formatSolAmount(state.bonding.solRaised ?? 0)}/${state.bonding.solTarget} SOL`
-              : "—"}
-        </Field>
+        <div className="col-span-2 sm:col-span-1">
+          <Field label="Bonding curve">
+            {state.bonding.bonded
+              ? "Bonded"
+              : state.bonding.progressPercent !== null
+                ? `${state.bonding.progressPercent}% · ${formatSolAmount(state.bonding.solRaised ?? 0)}/${state.bonding.solTarget} SOL`
+                : "—"}
+          </Field>
+        </div>
       </div>
 
       <div className="aqua-rule mt-6" />
@@ -320,18 +324,16 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
         {state.windowCallouts.length === 0 ? (
           <p className="mt-2 text-sm text-shill-deep/55">No callouts captured yet this window.</p>
         ) : (
-          <div className="aqua-scroll mt-2.5 min-h-[6.75rem] flex-1 overflow-y-auto overscroll-contain">
-            <div className="flex flex-wrap content-start gap-2">
-              {state.windowCallouts.map((c) => (
-                <span
-                  key={c.id}
-                  className="voice-chip aqua-chip max-w-full truncate rounded-full px-3 py-1.5 text-xs font-semibold text-shill-deep"
-                  title={c.wallet}
-                >
-                  {c.username}
-                </span>
-              ))}
-            </div>
+          <div className="mt-2.5 flex flex-wrap content-start gap-2 lg:min-h-[6.75rem] lg:flex-1 lg:overflow-y-auto lg:overscroll-contain">
+            {state.windowCallouts.map((c) => (
+              <span
+                key={c.id}
+                className="voice-chip aqua-chip max-w-full truncate rounded-full px-3 py-1.5 text-xs font-semibold text-shill-deep"
+                title={c.wallet}
+              >
+                {c.username}
+              </span>
+            ))}
           </div>
         )}
       </div>
@@ -342,12 +344,12 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
 function RoundRow({ round }: { round: PublicRound }) {
   const explorer = round.explorerLinks[0]
   return (
-    <article className="round-card rounded-2xl px-5 py-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+    <article className="round-card rounded-2xl px-4 py-3.5 sm:px-5 sm:py-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
         <span className="text-xs font-semibold tracking-[0.18em] text-primary uppercase">
           Snapshot #{round.number}
         </span>
-        <span className="text-xs text-shill-deep/50 tabular-nums">
+        <span className="text-[11px] text-shill-deep/50 tabular-nums sm:text-xs">
           {new Date(round.timestamp).toISOString().slice(11, 16)} UTC · {round.calloutCount} callers
         </span>
       </div>
@@ -423,17 +425,22 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
         { opacity: 1, y: 0, duration: 0.85, ease: "power2.out", stagger: 0.12, delay: 0.1 },
       )
 
-      gsap.to(".hero-logo", { y: -10, duration: 3.6, ease: "sine.inOut", yoyo: true, repeat: -1 })
-
-      gsap.to(".float-slow", {
-        y: "random(-12, 12)",
-        x: "random(-8, 8)",
-        duration: "random(5, 8)",
-        ease: "sine.inOut",
-        yoyo: true,
-        repeat: -1,
-        stagger: 0.5,
-      })
+      // Skip perpetual motion on phones — GSAP transforms during scroll feel sticky.
+      const coarse =
+        typeof window !== "undefined" &&
+        window.matchMedia("(hover: none) and (pointer: coarse)").matches
+      if (!coarse) {
+        gsap.to(".hero-logo", { y: -10, duration: 3.6, ease: "sine.inOut", yoyo: true, repeat: -1 })
+        gsap.to(".float-slow", {
+          y: "random(-12, 12)",
+          x: "random(-8, 8)",
+          duration: "random(5, 8)",
+          ease: "sine.inOut",
+          yoyo: true,
+          repeat: -1,
+          stagger: 0.5,
+        })
+      }
 
       // Opacity only — never visibility:hidden (autoAlpha), so a missed trigger
       // can't leave the whole board as a blank dark sky.
@@ -490,20 +497,20 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
       <main>
         {/* Panel 1 — the premise */}
         <section id="top" className="relative">
-          <div aria-hidden className="absolute inset-0 overflow-hidden">
+          <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
             <div className="scene-sky absolute inset-0" />
             <div className="scene-rays absolute inset-0" />
             <div className="scene-floor absolute inset-x-0 top-[66%] bottom-0" />
             <div className="scene-caustics absolute inset-x-0 top-[66%] bottom-0" />
             <div className="scene-horizon absolute inset-x-0 top-[66%] h-px" />
             <div className="scene-grain absolute inset-0" />
-            <div className="aqua-shard float-slow absolute -left-48 top-[18%] h-[22rem] w-[22rem] rounded-[46%_54%_42%_58%/52%_44%_56%_48%]" />
-            <div className="aqua-shard float-slow absolute -right-52 top-[22%] h-[24rem] w-[24rem] rounded-[54%_46%_58%_42%/48%_56%_44%_52%]" />
-            <span className="aqua-bubble float-slow absolute left-[4%] top-[72%] h-16 w-16 opacity-55" />
-            <span className="aqua-bubble float-slow absolute right-[5%] top-[70%] h-20 w-20 opacity-50" />
+            <div className="aqua-shard float-slow absolute -left-48 top-[18%] hidden h-[22rem] w-[22rem] rounded-[46%_54%_42%_58%/52%_44%_56%_48%] sm:block" />
+            <div className="aqua-shard float-slow absolute -right-52 top-[22%] hidden h-[24rem] w-[24rem] rounded-[54%_46%_58%_42%/48%_56%_44%_52%] sm:block" />
+            <span className="aqua-bubble float-slow absolute left-[4%] top-[72%] hidden h-16 w-16 opacity-55 sm:block" />
+            <span className="aqua-bubble float-slow absolute right-[5%] top-[70%] hidden h-20 w-20 opacity-50 sm:block" />
           </div>
 
-          <div className="relative mx-auto max-w-5xl px-5 pt-12 pb-14 sm:pt-16">
+          <div className="relative mx-auto max-w-5xl px-4 pt-10 pb-12 sm:px-5 sm:pt-16 sm:pb-14">
             <div className="flex flex-col items-center text-center">
               <Image
                 src="/brand/shill-mark.png"
@@ -511,24 +518,24 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
                 width={852}
                 height={715}
                 priority
-                sizes="(max-width: 640px) 280px, 380px"
-                className="hero-logo h-auto w-[17rem] object-contain drop-shadow-[0_18px_36px_rgb(8_60_120_/_0.28)] sm:w-[22rem]"
+                sizes="(max-width: 640px) 220px, 380px"
+                className="hero-logo h-auto w-[13.5rem] object-contain drop-shadow-[0_14px_28px_rgb(8_60_120_/_0.32)] sm:w-[22rem]"
               />
 
-              <h1 className="hero-line text-story mt-8 max-w-3xl text-3xl font-semibold leading-[1.15] tracking-tight text-shill-deep sm:mt-10 sm:text-4xl md:text-[2.9rem]">
+              <h1 className="hero-line text-story mt-6 max-w-3xl text-[1.65rem] font-semibold leading-[1.2] tracking-tight text-shill-deep [text-shadow:0_6px_18px_rgb(8_60_120_/_0.18)] sm:mt-10 sm:text-4xl sm:leading-[1.15] md:text-[2.9rem]">
                 In a world where nothing matters more than being heard, why should the loud voices
                 get nothing?
               </h1>
 
-              <p className="hero-line mt-5 max-w-2xl text-pretty text-base leading-relaxed text-shill-deep/70 sm:max-w-3xl sm:text-lg">
+              <p className="hero-line mt-4 max-w-xl text-pretty text-[0.95rem] leading-relaxed text-shill-deep/70 [text-shadow:0_4px_14px_rgb(8_60_120_/_0.14)] sm:mt-5 sm:max-w-3xl sm:text-lg">
                 SHILL reads the Pump.fun callout section, takes random snapshots, and pays the
                 wallets doing the talking. Automatically, on-chain, every {windowLabel}.
               </p>
 
-              <div className="hero-line mt-8 flex flex-wrap items-center justify-center gap-3">
+              <div className="hero-line mt-7 flex w-full max-w-sm flex-col items-stretch gap-2.5 sm:mt-8 sm:max-w-none sm:flex-row sm:flex-wrap sm:items-center sm:justify-center sm:gap-3">
                 <a
                   href="#mechanics"
-                  className="aqua-button rounded-full px-7 py-3 text-sm font-semibold tracking-[0.06em]"
+                  className="aqua-button rounded-full px-7 py-3 text-center text-sm font-semibold tracking-[0.06em]"
                 >
                   How it works
                 </a>
@@ -537,14 +544,14 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
                     href={telegram}
                     target="_blank"
                     rel="noreferrer"
-                    className="aqua-chip rounded-full px-7 py-3 text-sm font-semibold text-shill-deep transition hover:text-primary"
+                    className="aqua-chip rounded-full px-7 py-3 text-center text-sm font-semibold text-shill-deep transition hover:text-primary"
                   >
                     Telegram ↗
                   </a>
                 ) : null}
                 <a
                   href="#live"
-                  className="aqua-chip rounded-full px-7 py-3 text-sm font-semibold text-shill-deep transition hover:text-primary"
+                  className="aqua-chip rounded-full px-7 py-3 text-center text-sm font-semibold text-shill-deep transition hover:text-primary"
                 >
                   Live board
                 </a>
@@ -553,7 +560,7 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
                     href={xUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="aqua-chip rounded-full px-7 py-3 text-sm font-semibold text-shill-deep transition hover:text-primary"
+                    className="aqua-chip rounded-full px-7 py-3 text-center text-sm font-semibold text-shill-deep transition hover:text-primary"
                   >
                     X ↗
                   </a>
@@ -561,17 +568,17 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
               </div>
             </div>
 
-            <div className="mt-12">
+            <div className="mt-10 sm:mt-12">
               <CounterBar state={state} />
             </div>
           </div>
         </section>
 
         {/* Panel 2 — where it usually ends */}
-        <section id="story" className="relative px-5 py-14 sm:py-16">
-          <div className="mx-auto grid max-w-5xl items-stretch gap-5 lg:grid-cols-2">
-            <Panel className="flex h-full flex-col items-center px-6 py-7 text-center sm:px-8">
-              <h2 className="text-story text-2xl font-semibold tracking-tight text-shill-deep">
+        <section id="story" className="relative px-4 py-12 sm:px-5 sm:py-16">
+          <div className="mx-auto grid max-w-5xl items-stretch gap-4 sm:gap-5 lg:grid-cols-2">
+            <Panel className="flex h-full flex-col items-center px-5 py-6 text-center sm:px-8 sm:py-7">
+              <h2 className="text-story text-xl font-semibold tracking-tight text-shill-deep sm:text-2xl">
                 Every day people make callouts.
               </h2>
               <ul className="mt-5 inline-flex flex-col items-start space-y-2.5 text-left">
@@ -594,8 +601,8 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
               </p>
             </Panel>
 
-            <Panel className="flex h-full flex-col items-center px-6 py-7 text-center sm:px-8">
-              <p className="text-story text-xl font-semibold leading-snug text-shill-deep sm:text-2xl">
+            <Panel className="flex h-full flex-col items-center px-5 py-6 text-center sm:px-8 sm:py-7">
+              <p className="text-story text-lg font-semibold leading-snug text-shill-deep sm:text-2xl">
                 With SHILL, instead of just shouting into the void, your voice becomes part of the
                 flywheel.
               </p>
@@ -613,16 +620,16 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
         </section>
 
         {/* Panel 3 — the loop */}
-        <section className="relative px-5 pb-14 sm:pb-16">
-          <div className="relative mx-auto max-w-5xl">
-            <Panel className="relative z-0 overflow-visible px-5 py-5 text-center sm:px-7 sm:py-6">
+        <section className="relative px-4 pb-12 sm:px-5 sm:pb-16">
+          <div className="flywheel-stage relative mx-auto max-w-5xl">
+            <Panel className="flywheel-panel relative z-0 overflow-visible px-4 pt-5 text-center sm:px-7 sm:pt-6">
               <h2 className="text-story text-xl font-semibold tracking-tight text-shill-deep sm:text-2xl">
                 The flywheel
               </h2>
 
               <Flywheel />
 
-              <div className="mx-auto mt-4 flex max-w-2xl flex-col items-center gap-2 text-sm font-semibold text-shill-deep sm:flex-row sm:justify-center sm:gap-3 sm:text-base">
+              <div className="mx-auto mt-4 flex max-w-2xl flex-col items-center gap-1.5 text-sm font-semibold text-shill-deep sm:mt-4 sm:flex-row sm:justify-center sm:gap-3 sm:text-base">
                 <p>More participation creates more attention</p>
                 <span
                   aria-hidden
@@ -632,10 +639,10 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
                 </span>
                 <p>More attention creates more participation</p>
               </div>
-              <p className="mx-auto mt-4 max-w-xs text-sm leading-relaxed text-shill-deep/60 sm:max-w-sm">
+              <p className="mx-auto mt-3 max-w-xs text-sm leading-relaxed text-shill-deep/60 sm:mt-4 sm:max-w-sm">
                 It&apos;s a simple loop built around the one thing everyone is already trying to do:
               </p>
-              <p className="flywheel-punch mt-5">Get heard</p>
+              <p className="flywheel-punch relative z-10 mt-1.5 sm:mt-3">Get heard</p>
             </Panel>
             <Image
               src="/brand/shill-head.png"
@@ -643,7 +650,7 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
               width={700}
               height={520}
               aria-hidden
-              className="pointer-events-none absolute bottom-0 left-8 z-20 w-36 translate-y-[2px] drop-shadow-[0_12px_20px_rgb(8_60_120_/_0.32)] sm:left-12 sm:w-44 md:left-14 md:w-52"
+              className="flywheel-head pointer-events-none absolute bottom-0 left-1.5 z-20 translate-y-[2px] drop-shadow-[0_10px_18px_rgb(8_60_120_/_0.28)] sm:left-3 sm:translate-y-[3px] md:left-5"
             />
             <Image
               src="/brand/shill-head.png"
@@ -651,23 +658,23 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
               width={700}
               height={520}
               aria-hidden
-              className="pointer-events-none absolute bottom-0 right-8 z-20 w-36 translate-y-[2px] -scale-x-100 drop-shadow-[0_12px_20px_rgb(8_60_120_/_0.32)] sm:right-12 sm:w-44 md:right-14 md:w-52"
+              className="flywheel-head pointer-events-none absolute bottom-0 right-1.5 z-20 translate-y-[2px] -scale-x-100 drop-shadow-[0_10px_18px_rgb(8_60_120_/_0.28)] sm:right-3 sm:translate-y-[3px] md:right-5"
             />
           </div>
         </section>
 
         {/* Panel 4 — mechanics, three phases */}
-        <section id="mechanics" className="relative px-5 pb-14 sm:pb-16">
+        <section id="mechanics" className="relative px-4 pb-12 sm:px-5 sm:pb-16">
           <div className="mx-auto max-w-5xl">
             <div className="text-center">
               <Eyebrow>How it works</Eyebrow>
-              <h2 className="text-story mt-3 text-2xl font-semibold tracking-tight text-shill-deep sm:text-3xl">
+              <h2 className="text-story mt-3 text-xl font-semibold tracking-tight text-shill-deep sm:text-3xl">
                 Three phases, one rule: callouts get paid.
               </h2>
             </div>
 
-            <div className="mt-8 grid gap-5 lg:grid-cols-3">
-              <Panel className="flex flex-col">
+            <div className="mt-7 grid gap-4 sm:mt-8 sm:gap-5 lg:grid-cols-3">
+              <Panel className="flex flex-col px-5 py-6 sm:px-6 sm:py-7">
                 <Eyebrow>Phase 1 · pre-bond</Eyebrow>
                 <h3 className="mt-2 text-lg font-semibold text-shill-deep">Supply rewards</h3>
                 <p className="mt-3 text-sm leading-relaxed text-shill-deep/75">
@@ -697,7 +704,7 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
                 </div>
               </Panel>
 
-              <Panel className="flex flex-col">
+              <Panel className="flex flex-col px-5 py-6 sm:px-6 sm:py-7">
                 <Eyebrow>Phase 2 · on bond</Eyebrow>
                 <h3 className="mt-2 text-lg font-semibold text-shill-deep">One-time lottery</h3>
                 <p className="mt-3 text-sm leading-relaxed text-shill-deep/75">
@@ -720,7 +727,7 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
                 </div>
               </Panel>
 
-              <Panel className="flex flex-col">
+              <Panel className="flex flex-col px-5 py-6 sm:px-6 sm:py-7">
                 <Eyebrow>Phase 3 · post-bond</Eyebrow>
                 <h3 className="mt-2 text-lg font-semibold text-shill-deep">Creator rewards</h3>
                 <p className="mt-3 text-sm leading-relaxed text-shill-deep/75">
@@ -744,11 +751,11 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
         </section>
 
         {/* Panel 5 — live proof */}
-        <section id="live" className="relative px-5 pb-16 sm:pb-20">
+        <section id="live" className="relative px-4 pb-14 sm:px-5 sm:pb-20">
           <div className="mx-auto max-w-5xl">
             <div className="text-center">
               <Eyebrow>Live</Eyebrow>
-              <h2 className="text-story mt-3 text-2xl font-semibold tracking-tight text-shill-deep sm:text-3xl">
+              <h2 className="text-story mt-3 text-xl font-semibold tracking-tight text-shill-deep sm:text-3xl">
                 Every snapshot is public and verifiable.
               </h2>
               <p className="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-shill-deep/65">
@@ -758,10 +765,10 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
               </p>
             </div>
 
-            <div className="live-board-grid mt-8 grid items-stretch gap-5 lg:grid-cols-[1.15fr_1fr]">
+            <div className="live-board-grid mt-7 grid items-stretch gap-4 sm:mt-8 sm:gap-5 lg:grid-cols-[1.15fr_1fr]">
               <LiveBoard state={state} error={error} />
 
-              <div className="rounds-scroll aqua-scroll space-y-4 overflow-y-auto overscroll-contain">
+              <div className="rounds-scroll aqua-scroll space-y-3 sm:space-y-4">
                 {state && rounds.length === 0 ? (
                   <Panel>
                     <p className="text-sm text-shill-deep/60">
@@ -779,7 +786,7 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
       </main>
 
       <footer className="relative border-t border-white/40 bg-white/30 backdrop-blur-md">
-        <div className="mx-auto max-w-5xl px-5 py-5 sm:py-6">
+        <div className="mx-auto max-w-5xl px-4 py-5 sm:px-5 sm:py-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
             <div className="flex min-w-0 items-center gap-2.5">
               <Image

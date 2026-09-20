@@ -105,7 +105,7 @@ describe("MigrationMonitor", () => {
     expect(store.migrationPaid).toBe(true)
   })
 
-  it("edits a bond progress bar and broadcasts the payout plus tx", async () => {
+  it("tracks bonding progress without a dedicated bond channel message", async () => {
     const collector = new CalloutCollector()
     const broadcast = new RecordingBroadcast()
     const store = new EngineStore(() => collector.all(), () => broadcast.getMessages(), {
@@ -149,8 +149,7 @@ describe("MigrationMonitor", () => {
     )
     expect(await filling.pollOnce()).toBeNull()
     expect(store.migrationProgressPercent).toBe(50)
-    expect(broadcast.sequence[0]?.kind).toBe("bond")
-    expect(broadcast.sequence[0]?.text).toContain("50%")
+    expect(broadcast.sequence.some((item) => item.kind === "bond")).toBe(false)
 
     const paying = new MigrationMonitor(
       store,
@@ -170,7 +169,7 @@ describe("MigrationMonitor", () => {
     expect(audit?.transaction?.signature).toBeTruthy()
     expect(store.migrationProgressPercent).toBe(100)
     const kinds = broadcast.sequence.map((item) => `${item.op}:${item.kind}`)
-    expect(kinds).toContain("send:bond")
+    expect(kinds).not.toContain("send:bond")
     expect(kinds).toContain("send:migration")
     expect(kinds.some((kind) => kind.endsWith(":distribution"))).toBe(true)
     expect(broadcast.sequence.some((item) => item.text.includes("BONDING BONUS SENT"))).toBe(true)
@@ -179,7 +178,7 @@ describe("MigrationMonitor", () => {
 })
 
 class RecordingBroadcast implements Broadcast {
-  readonly sequence: Array<{ op: "send" | "edit"; kind: string; text: string }> = []
+  readonly sequence: Array<{ op: "send" | "edit" | "delete"; kind: string; text: string }> = []
   private readonly inner = new PreviewBroadcast()
 
   getMessages() {
@@ -194,6 +193,25 @@ class RecordingBroadcast implements Broadcast {
   async edit(id: string, message: FormattedMessage) {
     this.sequence.push({ op: "edit", kind: message.kind, text: message.text })
     return this.inner.edit(id, message)
+  }
+
+  async delete(id: string) {
+    const current = this.inner.getMessages().find((item) => item.id === id)
+    this.sequence.push({
+      op: "delete",
+      kind: current?.kind ?? "unknown",
+      text: current?.text ?? "",
+    })
+    await this.inner.delete(id)
+  }
+
+  async clear(options?: { purgeTelegram?: number }) {
+    this.sequence.push({
+      op: "delete",
+      kind: "clear",
+      text: `purge=${options?.purgeTelegram ?? 0}`,
+    })
+    await this.inner.clear(options)
   }
 
   async disablePublicCommands() {

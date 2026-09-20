@@ -17,17 +17,16 @@ import type {
 } from "@/engine/types"
 import type { Broadcast } from "@/telegram/broadcast"
 import {
-  distributionConfirmed,
-  distributionPreparing,
-  distributionSending,
   qualifiedCaller,
   rouletteSelected,
   rouletteSpin,
   rouletteStart,
   snapshotAnnouncement,
-  snapshotFinal,
-  snapshotRecipients,
+  snapshotPayout,
   snapshotTaking,
+  withBondProgress,
+  type BondSnippet,
+  type FormattedMessage,
 } from "@/telegram/messages"
 
 export type Clock = {
@@ -57,6 +56,10 @@ function uniqueWindowCallouts(callouts: Callout[]): Callout[] {
 export class SnapshotEngine {
   private scheduler: ReturnType<typeof setTimeout> | null = null
   private firstSchedule = true
+  private qualifiedWindowKey = ""
+  private qualifiedNotified = new Set<string>()
+  private qualifiedMessageId: string | null = null
+  private qualifiedBoardChain: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly store: EngineStore,
@@ -69,6 +72,56 @@ export class SnapshotEngine {
 
   get config(): EngineConfig {
     return this.store.config
+  }
+
+  private bondSnippet(): BondSnippet | null {
+    if (this.store.migrationBonded || this.store.migrationPaid) return null
+    const percent = this.store.migrationProgressPercent
+    if (percent == null) return null
+    return {
+      percent,
+      solRaised: this.store.migrationSolRaised ?? 0,
+      solTarget: this.store.migrationSolTarget,
+      bonded: false,
+    }
+  }
+
+  private decorate(message: FormattedMessage): FormattedMessage {
+    return withBondProgress(message, this.bondSnippet())
+  }
+
+  private send(message: FormattedMessage) {
+    return this.broadcast.send(this.decorate(message))
+  }
+
+  private edit(id: string, message: FormattedMessage) {
+    return this.broadcast.edit(id, this.decorate(message))
+  }
+
+  private async delete(id: string) {
+    try {
+      await this.broadcast.delete(id)
+    } catch (error) {
+      this.store.log(
+        "warn",
+        error instanceof Error ? error.message : "Failed to delete Telegram message",
+      )
+    }
+  }
+
+  private async clearQualifiedBoard() {
+    await this.qualifiedBoardChain
+    const id = this.qualifiedMessageId
+    this.qualifiedMessageId = null
+    if (id) await this.delete(id)
+  }
+
+  private resetQualifiedNoticesIfNeeded() {
+    const key = this.store.lastSnapshotAt ?? this.store.startedAt
+    if (key === this.qualifiedWindowKey) return
+    this.qualifiedWindowKey = key
+    this.qualifiedNotified.clear()
+    this.qualifiedMessageId = null
   }
 
   start() {
@@ -170,6 +223,8 @@ export class SnapshotEngine {
     capturedAt?: string
     id?: string
     thesis?: string
+    /** Skip Telegram qualified notice (e.g. historical backfill). Still counts in the window. */
+    silent?: boolean
   }): Callout {
     const source = input.source ?? "private-ingest"
     if (!this.store.config.calloutSources.includes(source)) {
@@ -193,29 +248,69 @@ export class SnapshotEngine {
       throw new DuplicateCalloutError(callout)
     }
     this.store.emitState()
-    this.notifyQualified(callout)
+    if (!input.silent) this.notifyQualified(callout)
     return callout
   }
 
   private notifyQualified(callout: Callout) {
+    this.resetQualifiedNoticesIfNeeded()
     if (this.store.snapshotInProgress) return
     const windowStartIso = this.store.lastSnapshotAt ?? this.store.startedAt
     if (callout.capturedAt < windowStartIso) return
+
+    const user = callerKey(callout.callerUsername)
+    const wallet = callout.wallet.trim()
+    // One QUALIFIED board refresh per new identity per snapshot window.
+    if (this.qualifiedNotified.has(user) || this.qualifiedNotified.has(wallet)) return
+
+    this.qualifiedNotified.add(user)
+    this.qualifiedNotified.add(wallet)
+
     const windowStart = new Date(windowStartIso)
-    const windowCount = uniqueWindowCallouts(
+    const eligible = uniqueWindowCallouts(
       this.collector
         .captureWindow(windowStart, this.clock.now())
         .filter((row) => tokensMatch(row.token, this.config.distributionToken)),
-    ).length
+    )
     const explorer = {
       txTemplate: this.config.explorerTxTemplate,
       addressTemplate: this.config.explorerAddressTemplate,
     }
-    void this.broadcast
-      .send(qualifiedCaller({ callout, windowCount, explorer }))
+
+    this.qualifiedBoardChain = this.qualifiedBoardChain
+      .then(() => this.repostQualifiedBoard(eligible, explorer))
       .catch((error) => {
         this.store.log("warn", error instanceof Error ? error.message : "Qualified notice failed")
       })
+  }
+
+  /** Wait for in-flight QUALIFIED delete/repost work (tests / shutdown). */
+  async flushQualifiedNotices() {
+    await this.qualifiedBoardChain
+  }
+
+  /**
+   * Mint switch: wipe the Telegram channel board + local qualified tracking.
+   * Purges recent channel posts (bots cannot list history).
+   */
+  async resetForMintChange() {
+    await this.qualifiedBoardChain
+    this.qualifiedNotified.clear()
+    this.qualifiedWindowKey = ""
+    this.qualifiedMessageId = null
+    await this.broadcast.clear({ purgeTelegram: 400 })
+  }
+
+  private async repostQualifiedBoard(
+    eligible: Callout[],
+    explorer: { txTemplate: string; addressTemplate: string },
+  ) {
+    const previousId = this.qualifiedMessageId
+    this.qualifiedMessageId = null
+    if (previousId) await this.delete(previousId)
+
+    const msg = await this.send(qualifiedCaller({ callouts: eligible, explorer }))
+    this.qualifiedMessageId = msg.id
   }
 
   async runSnapshot(trigger: SnapshotTrigger = "admin"): Promise<SnapshotAudit | null> {
@@ -226,6 +321,7 @@ export class SnapshotEngine {
     this.store.snapshotInProgress = true
     this.store.phase = "capturing"
     this.store.emitState()
+    await this.clearQualifiedBoard()
 
     const snapshotTimestamp = this.clock.now()
     const previous = this.store.lastSnapshotAt
@@ -283,10 +379,10 @@ export class SnapshotEngine {
       addressTemplate: cfg.explorerAddressTemplate,
     }
 
-    const snapshotMsg = await this.broadcast.send(snapshotTaking())
+    const snapshotMsg = await this.send(snapshotTaking())
     audit.telegramMessageIds.snapshot = snapshotMsg.id
     await this.clock.sleep(500)
-    await this.broadcast.edit(
+    await this.edit(
       snapshotMsg.id,
       snapshotAnnouncement({
         calloutCount,
@@ -307,37 +403,42 @@ export class SnapshotEngine {
       this.random,
     )
 
-    const rouletteMsg = await this.broadcast.send(rouletteStart())
+    const rouletteMsg = await this.send(rouletteStart())
     audit.telegramMessageIds.roulette = rouletteMsg.id
 
     for (const frame of frames) {
       await this.clock.sleep(frame.delayMs)
-      await this.broadcast.edit(rouletteMsg.id, rouletteSpin(frame.callerUsername))
+      await this.edit(rouletteMsg.id, rouletteSpin(frame.callerUsername))
     }
 
     await this.clock.sleep(Math.round(cfg.rouletteFrameMs * 1.2))
     // Always publish the precommitted winner — never the last animation frame.
-    await this.broadcast.edit(
+    await this.edit(
       rouletteMsg.id,
       rouletteSelected(selection.rouletteWinner, explorer),
     )
 
     this.store.phase = "announcing"
-    const recipientsMsg = await this.broadcast.send(
-      snapshotRecipients({
+    const payoutMsg = await this.send(
+      snapshotPayout({
         lastCallout: selection.lastCallout,
         rouletteWinner: selection.rouletteWinner,
+        lastTx: null,
+        rouletteTx: null,
         allocationAmount: cfg.allocationAmount,
         distributionToken: cfg.distributionToken,
+        snapshotMinMs: cfg.snapshotMinMs,
+        snapshotMaxMs: cfg.snapshotMaxMs,
         explorer,
+        pendingLabel: "Sending rewards…",
       }),
     )
-    audit.telegramMessageIds.recipients = recipientsMsg.id
+    audit.telegramMessageIds.final = payoutMsg.id
+    audit.telegramMessageIds.recipients = payoutMsg.id
+    audit.telegramMessageIds.distribution = payoutMsg.id
+    this.store.upsertAudit(audit)
 
     this.store.phase = "distributing"
-    const distMsg = await this.broadcast.send(distributionPreparing())
-    audit.telegramMessageIds.distribution = distMsg.id
-
     const pendingLast = txPending({
       kind: "last_callout",
       calloutId: selection.lastCallout.id,
@@ -347,7 +448,7 @@ export class SnapshotEngine {
       amount: cfg.allocationAmount,
       distributionToken: cfg.distributionToken,
     })
-    const lastTx = await this.sendOne(distMsg.id, pendingLast, [])
+    const lastTx = await this.sendOne(payoutMsg.id, pendingLast, null, null, selection)
     audit.transactions = [lastTx]
     this.store.treasuryBalance = this.treasury.balance
     this.store.upsertAudit(audit)
@@ -361,17 +462,17 @@ export class SnapshotEngine {
       amount: cfg.allocationAmount,
       distributionToken: cfg.distributionToken,
     })
-    const rouletteTx = await this.sendOne(distMsg.id, pendingRoulette, [lastTx])
+    const rouletteTx = await this.sendOne(payoutMsg.id, pendingRoulette, lastTx, null, selection)
     audit.transactions = [lastTx, rouletteTx]
     audit.totalDistributed =
       (lastTx.status === "confirmed" ? lastTx.amount : 0) +
       (rouletteTx.status === "confirmed" ? rouletteTx.amount : 0)
     this.store.treasuryBalance = this.treasury.balance
-    this.store.upsertAudit(audit)
 
     this.store.phase = "finalizing"
-    const finalMsg = await this.broadcast.send(
-      snapshotFinal({
+    await this.edit(
+      payoutMsg.id,
+      snapshotPayout({
         lastCallout: selection.lastCallout,
         rouletteWinner: selection.rouletteWinner,
         lastTx,
@@ -381,24 +482,42 @@ export class SnapshotEngine {
         snapshotMinMs: cfg.snapshotMinMs,
         snapshotMaxMs: cfg.snapshotMaxMs,
         explorer,
+        pendingLabel: null,
       }),
     )
-    audit.telegramMessageIds.final = finalMsg.id
     this.store.upsertAudit(audit)
   }
 
   private async sendOne(
-    distributionMessageId: string,
+    payoutMessageId: string,
     pending: DistributionTx,
-    alreadyConfirmed: DistributionTx[],
+    lastTx: DistributionTx | null,
+    rouletteTx: DistributionTx | null,
+    selection: RecipientSelection,
   ): Promise<DistributionTx> {
+    const cfg = this.config
     const explorer = {
-      txTemplate: this.config.explorerTxTemplate,
-      addressTemplate: this.config.explorerAddressTemplate,
+      txTemplate: cfg.explorerTxTemplate,
+      addressTemplate: cfg.explorerAddressTemplate,
     }
-    await this.broadcast.edit(
-      distributionMessageId,
-      distributionSending(pending, alreadyConfirmed, explorer),
+
+    const draftLast = pending.kind === "last_callout" ? pending : lastTx
+    const draftRoulette = pending.kind === "roulette" ? pending : rouletteTx
+
+    await this.edit(
+      payoutMessageId,
+      snapshotPayout({
+        lastCallout: selection.lastCallout,
+        rouletteWinner: selection.rouletteWinner,
+        lastTx: draftLast,
+        rouletteTx: draftRoulette,
+        allocationAmount: cfg.allocationAmount,
+        distributionToken: cfg.distributionToken,
+        snapshotMinMs: cfg.snapshotMinMs,
+        snapshotMaxMs: cfg.snapshotMaxMs,
+        explorer,
+        pendingLabel: `Sending ${pending.kind === "last_callout" ? "last callout" : "roulette"} reward…`,
+      }),
     )
 
     try {
@@ -414,9 +533,25 @@ export class SnapshotEngine {
         status: "confirmed",
         confirmedAt: result.confirmedAt,
       }
-      await this.broadcast.edit(
-        distributionMessageId,
-        distributionConfirmed([...alreadyConfirmed, confirmed], explorer),
+      const nextLast = confirmed.kind === "last_callout" ? confirmed : lastTx
+      const nextRoulette = confirmed.kind === "roulette" ? confirmed : rouletteTx
+      await this.edit(
+        payoutMessageId,
+        snapshotPayout({
+          lastCallout: selection.lastCallout,
+          rouletteWinner: selection.rouletteWinner,
+          lastTx: nextLast,
+          rouletteTx: nextRoulette,
+          allocationAmount: cfg.allocationAmount,
+          distributionToken: cfg.distributionToken,
+          snapshotMinMs: cfg.snapshotMinMs,
+          snapshotMaxMs: cfg.snapshotMaxMs,
+          explorer,
+          pendingLabel:
+            nextLast && nextRoulette
+              ? null
+              : `Sending ${confirmed.kind === "last_callout" ? "roulette" : "last callout"} reward…`,
+        }),
       )
       return confirmed
     } catch (error) {
@@ -425,9 +560,22 @@ export class SnapshotEngine {
         status: "failed",
         error: error instanceof Error ? error.message : "Treasury send failed",
       }
-      await this.broadcast.edit(
-        distributionMessageId,
-        distributionConfirmed([...alreadyConfirmed, failed], explorer),
+      const nextLast = failed.kind === "last_callout" ? failed : lastTx
+      const nextRoulette = failed.kind === "roulette" ? failed : rouletteTx
+      await this.edit(
+        payoutMessageId,
+        snapshotPayout({
+          lastCallout: selection.lastCallout,
+          rouletteWinner: selection.rouletteWinner,
+          lastTx: nextLast,
+          rouletteTx: nextRoulette,
+          allocationAmount: cfg.allocationAmount,
+          distributionToken: cfg.distributionToken,
+          snapshotMinMs: cfg.snapshotMinMs,
+          snapshotMaxMs: cfg.snapshotMaxMs,
+          explorer,
+          pendingLabel: null,
+        }),
       )
       return failed
     }

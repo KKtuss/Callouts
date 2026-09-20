@@ -1,5 +1,5 @@
 import { minutesLabel } from "@/lib/format"
-import { DEFAULT_MIGRATION_BONUS, PUMP_BOND_TARGET_SOL } from "@/lib/coin"
+import { DEFAULT_MIGRATION_BONUS, PUMP_BOND_TARGET_SOL, PUMP_TOTAL_SUPPLY } from "@/lib/coin"
 import type {
   Callout,
   ChannelMessage,
@@ -233,5 +233,17 @@ export class EngineStore {
     this.migrationProgressPercent = null
     this.migrationSolRaised = null
     this.migrationSolTarget = PUMP_BOND_TARGET_SOL
+  }
+
+  /** Wipe rounds, bonuses, and window clock when the watched mint changes. */
+  resetHistoryForMint(at = new Date().toISOString()) {
+    this.audits = []
+    this.migrations = []
+    this.lastSnapshotAt = at
+    this.nextSnapshotAt = null
+    this.snapshotInProgress = false
+    this.phase = "idle"
+    this.treasuryBalance = PUMP_TOTAL_SUPPLY
+    this.resetMigrationForMint(at)
   }
 }

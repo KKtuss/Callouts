@@ -5,7 +5,8 @@ import {
   qualifiedCaller,
   rouletteSelected,
   snapshotAnnouncement,
-  snapshotFinal,
+  snapshotPayout,
+  withBondProgress,
 } from "@/telegram/messages"
 import { progressBar } from "@/lib/format"
 import type { Callout, DistributionTx } from "@/engine/types"
@@ -56,11 +57,11 @@ describe("public Telegram surface", () => {
 
     const selected = rouletteSelected(callout)
     expect(selected.text).toContain("SELECTED")
-    expect(selected.text).toContain("$BONK")
+    expect(selected.text).not.toContain("$BONK")
     expect(selected.text).toContain("@username")
     expect(selected.html).toContain("solscan.io/account/")
 
-    const final = snapshotFinal({
+    const final = snapshotPayout({
       lastCallout: callout,
       rouletteWinner: { ...callout, id: "a", callerUsername: "@alpha" },
       lastTx: tx,
@@ -70,21 +71,27 @@ describe("public Telegram surface", () => {
       snapshotMinMs: 5 * 60_000,
       snapshotMaxMs: 15 * 60_000,
     })
+    expect(final.text).toContain("PAYOUT")
+    expect(final.text).toContain("@username")
+    expect(final.text).toContain("@alpha")
     expect(final.text).toContain("Next snapshot")
     expect(final.html).toContain("href=")
     expect(final.text).not.toMatch(/\/status|\/balance|\/config/)
   })
 
   it("formats qualified-caller and bond-progress notices", () => {
-    const qualified = qualifiedCaller({ callout, windowCount: 12 })
+    const qualified = qualifiedCaller({
+      callouts: [callout, { ...callout, id: "e", callerUsername: "@beta" }],
+    })
     expect(qualified.kind).toBe("qualified")
     expect(qualified.text).toContain("QUALIFIED")
     expect(qualified.text).toContain("@username")
-    expect(qualified.text).toContain("Eligible this snapshot: 12")
+    expect(qualified.text).toContain("@beta")
+    expect(qualified.text).toContain("Eligible this snapshot: 2")
+    expect(qualified.text).not.toContain("$BONK")
     expect(qualified.text).not.toMatch(/\/pause|\/admin/)
 
     const bond = bondProgress({
-      token: "AIDEN",
       percent: 82,
       solRaised: 69.7,
       solTarget: 85,
@@ -96,5 +103,23 @@ describe("public Telegram surface", () => {
     expect(bond.text).toContain("82%")
     expect(bond.text).toContain("69.7 / 85.0 SOL")
     expect(bond.text).toContain("Bonus pool: 2 wallets")
+    expect(bond.text).not.toContain("AIDEN")
+  })
+
+  it("appends bonding progress until the coin is bonded", () => {
+    const base = qualifiedCaller({ callouts: [callout] })
+    const withBar = withBondProgress(base, {
+      percent: 40,
+      solRaised: 34,
+      solTarget: 85,
+    })
+    expect(withBar.text).toContain(progressBar(40))
+    expect(withBar.text).toContain("40%")
+    expect(withBondProgress(base, { percent: 100, solRaised: 85, solTarget: 85 }).text).toBe(
+      base.text,
+    )
+    expect(withBondProgress(base, { percent: 50, solRaised: 40, solTarget: 85, bonded: true }).text).toBe(
+      base.text,
+    )
   })
 })

@@ -1,7 +1,6 @@
 import { explorerAddressUrl, explorerTxUrl } from "@/lib/explorer"
 import {
   DIVIDER,
-  displayToken,
   displayUsername,
   escapeHtml,
   formatAmount,
@@ -115,15 +114,12 @@ export function rouletteSelected(
   winner: Callout,
   explorer?: ExplorerLinks,
 ): FormattedMessage {
-  const ticker = displayToken(winner.token)
   const caller = displayUsername(winner.callerUsername)
   const wallet = walletLine(winner.wallet, explorer)
   const text = [
     "🎰 ROULETTE",
     "",
     "🎯 SELECTED",
-    "",
-    ticker,
     "",
     "Caller:",
     caller,
@@ -135,8 +131,6 @@ export function rouletteSelected(
     `🎰 ${bold("ROULETTE")}`,
     "",
     `🎯 ${bold("SELECTED")}`,
-    "",
-    bold(ticker),
     "",
     "Caller:",
     escapeHtml(caller),
@@ -166,8 +160,6 @@ export function snapshotRecipients(input: {
     "",
     "🥇 LAST CALLOUT",
     "",
-    displayToken(input.lastCallout.token),
-    "",
     "Caller:",
     displayUsername(input.lastCallout.callerUsername),
     "",
@@ -180,8 +172,6 @@ export function snapshotRecipients(input: {
     DIVIDER,
     "",
     "🎰 ROULETTE WINNER",
-    "",
-    displayToken(input.rouletteWinner.token),
     "",
     "Caller:",
     displayUsername(input.rouletteWinner.callerUsername),
@@ -206,8 +196,6 @@ export function snapshotRecipients(input: {
     "",
     `🥇 ${bold("LAST CALLOUT")}`,
     "",
-    bold(displayToken(input.lastCallout.token)),
-    "",
     "Caller:",
     escapeHtml(displayUsername(input.lastCallout.callerUsername)),
     "",
@@ -220,8 +208,6 @@ export function snapshotRecipients(input: {
     DIVIDER,
     "",
     `🎰 ${bold("ROULETTE WINNER")}`,
-    "",
-    bold(displayToken(input.rouletteWinner.token)),
     "",
     "Caller:",
     escapeHtml(displayUsername(input.rouletteWinner.callerUsername)),
@@ -382,7 +368,6 @@ export function snapshotFinal(input: {
     "",
     "🥇 Last Callout",
     "",
-    displayToken(input.lastCallout.token),
     `→ ${lastWallet.text}`,
     "",
     `${amount} sent`,
@@ -394,7 +379,6 @@ export function snapshotFinal(input: {
     "",
     "🎰 Roulette Winner",
     "",
-    displayToken(input.rouletteWinner.token),
     `→ ${rouletteWallet.text}`,
     "",
     `${amount} sent`,
@@ -418,7 +402,6 @@ export function snapshotFinal(input: {
     "",
     `🥇 ${bold("Last Callout")}`,
     "",
-    bold(displayToken(input.lastCallout.token)),
     `→ ${lastWallet.html}`,
     "",
     `${escapeHtml(amount)} sent`,
@@ -430,7 +413,6 @@ export function snapshotFinal(input: {
     "",
     `🎰 ${bold("Roulette Winner")}`,
     "",
-    bold(displayToken(input.rouletteWinner.token)),
     `→ ${rouletteWallet.html}`,
     "",
     `${escapeHtml(amount)} sent`,
@@ -450,43 +432,229 @@ export function snapshotFinal(input: {
   return pair(html, text, "final")
 }
 
+export type BondSnippet = {
+  percent: number
+  solRaised: number
+  solTarget: number
+  bonded?: boolean
+}
+
+/** Append the bonding bar to a channel message. Hidden once the coin is bonded. */
+export function withBondProgress(
+  message: FormattedMessage,
+  bond: BondSnippet | null | undefined,
+): FormattedMessage {
+  if (!bond || bond.bonded || bond.percent >= 100) return message
+  const bar = progressBar(bond.percent)
+  const status = `${bond.percent}%`
+  const fill = `${formatSol(bond.solRaised)} / ${formatSol(bond.solTarget)} SOL`
+  return {
+    ...message,
+    text: `${message.text}\n\n${bar} ${status} · ${fill}`,
+    html: `${message.html}\n\n${code(bar)} ${bold(status)} · ${escapeHtml(fill)}`,
+  }
+}
+
 export function qualifiedCaller(input: {
-  callout: Callout
-  windowCount: number
+  callouts: Callout[]
   explorer?: ExplorerLinks
 }): FormattedMessage {
-  const caller = displayUsername(input.callout.callerUsername)
-  const ticker = displayToken(input.callout.token)
-  const wallet = walletLine(input.callout.wallet, input.explorer)
-  const text = [
+  const list = input.callouts
+  const count = list.length
+  const names = list.map((c) => displayUsername(c.callerUsername))
+  const maxShown = 40
+  const shown = names.slice(0, maxShown)
+  const overflow = names.length - shown.length
+
+  const lines = [
     "✅ QUALIFIED",
     "",
-    ticker,
+    `Eligible this snapshot: ${count}`,
     "",
-    caller,
-    "",
-    "Wallet:",
-    wallet.text,
-    "",
-    `Eligible this snapshot: ${input.windowCount}`,
-  ].join("\n")
-  const html = [
+    ...shown,
+  ]
+  if (overflow > 0) lines.push(`…and ${overflow} more`)
+
+  const htmlLines = [
     `✅ ${bold("QUALIFIED")}`,
     "",
-    bold(ticker),
+    `Eligible this snapshot: ${bold(String(count))}`,
     "",
-    escapeHtml(caller),
+    ...shown.map((name) => escapeHtml(name)),
+  ]
+  if (overflow > 0) htmlLines.push(escapeHtml(`…and ${overflow} more`))
+
+  return pair(htmlLines.join("\n"), lines.join("\n"), "qualified")
+}
+
+/** One lasting payout notice: winners, amounts, and sendout txs. */
+export function snapshotPayout(input: {
+  lastCallout: Callout
+  rouletteWinner: Callout
+  lastTx: DistributionTx | null
+  rouletteTx: DistributionTx | null
+  allocationAmount: number
+  distributionToken: string
+  snapshotMinMs: number
+  snapshotMaxMs: number
+  explorer?: ExplorerLinks
+  pendingLabel?: string | null
+}): FormattedMessage {
+  const amount = formatAmount(input.allocationAmount, input.distributionToken)
+  const total = formatAmount(input.allocationAmount * 2, input.distributionToken)
+  const range = minutesLabel(input.snapshotMinMs, input.snapshotMaxMs)
+  const lastBlock = formatWinnerBlock({
+    title: "🥇 Last callout",
+    titleHtml: `🥇 ${bold("Last callout")}`,
+    callout: input.lastCallout,
+    amount,
+    tx: input.lastTx,
+    explorer: input.explorer,
+  })
+  const rouletteBlock = formatWinnerBlock({
+    title: "🎰 Roulette winner",
+    titleHtml: `🎰 ${bold("Roulette winner")}`,
+    callout: input.rouletteWinner,
+    amount,
+    tx: input.rouletteTx,
+    explorer: input.explorer,
+  })
+
+  const footerText = input.pendingLabel
+    ? [input.pendingLabel]
+    : ["Next snapshot:", `⏳ Randomized between ${range}`]
+  const footerHtml = input.pendingLabel
+    ? [escapeHtml(input.pendingLabel)]
+    : ["Next snapshot:", `⏳ Randomized between ${escapeHtml(range)}`]
+
+  const text = [
+    "💸 PAYOUT",
     "",
-    "Wallet:",
-    wallet.html,
+    DIVIDER,
     "",
-    `Eligible this snapshot: ${bold(String(input.windowCount))}`,
+    lastBlock.text,
+    "",
+    DIVIDER,
+    "",
+    rouletteBlock.text,
+    "",
+    DIVIDER,
+    "",
+    "💰 Total",
+    total,
+    "",
+    ...footerText,
   ].join("\n")
-  return pair(html, text, "qualified")
+
+  const html = [
+    `💸 ${bold("PAYOUT")}`,
+    "",
+    DIVIDER,
+    "",
+    lastBlock.html,
+    "",
+    DIVIDER,
+    "",
+    rouletteBlock.html,
+    "",
+    DIVIDER,
+    "",
+    `💰 ${bold("Total")}`,
+    bold(total),
+    "",
+    ...footerHtml,
+  ].join("\n")
+
+  return pair(html, text, "final")
+}
+
+function formatWinnerBlock(input: {
+  title: string
+  titleHtml: string
+  callout: Callout
+  amount: string
+  tx: DistributionTx | null
+  explorer?: ExplorerLinks
+}): { html: string; text: string } {
+  const caller = displayUsername(input.callout.callerUsername)
+  const wallet = walletLine(input.callout.wallet, input.explorer)
+  const tx = input.tx
+
+  if (!tx) {
+    return {
+      text: [
+        input.title,
+        caller,
+        `→ ${wallet.text}`,
+        `${input.amount} · pending`,
+      ].join("\n"),
+      html: [
+        input.titleHtml,
+        escapeHtml(caller),
+        `→ ${wallet.html}`,
+        `${escapeHtml(input.amount)} · pending`,
+      ].join("\n"),
+    }
+  }
+
+  if (tx.status === "failed") {
+    return {
+      text: [
+        input.title,
+        caller,
+        `→ ${wallet.text}`,
+        `${input.amount} · failed`,
+        tx.error ?? "Treasury send failed.",
+      ].join("\n"),
+      html: [
+        input.titleHtml,
+        escapeHtml(caller),
+        `→ ${wallet.html}`,
+        `${escapeHtml(input.amount)} · failed`,
+        escapeHtml(tx.error ?? "Treasury send failed."),
+      ].join("\n"),
+    }
+  }
+
+  if (tx.status === "pending" || !tx.signature) {
+    return {
+      text: [
+        input.title,
+        caller,
+        `→ ${wallet.text}`,
+        `${input.amount} · sending…`,
+      ].join("\n"),
+      html: [
+        input.titleHtml,
+        escapeHtml(caller),
+        `→ ${wallet.html}`,
+        `${escapeHtml(input.amount)} · sending…`,
+      ].join("\n"),
+    }
+  }
+
+  const sig = txLine(tx.signature, input.explorer)
+  return {
+    text: [
+      input.title,
+      caller,
+      `→ ${wallet.text}`,
+      `${input.amount} sent`,
+      "TX:",
+      sig.text,
+    ].join("\n"),
+    html: [
+      input.titleHtml,
+      escapeHtml(caller),
+      `→ ${wallet.html}`,
+      `${escapeHtml(input.amount)} sent`,
+      "TX:",
+      sig.html,
+    ].join("\n"),
+  }
 }
 
 export function bondProgress(input: {
-  token: string
   percent: number
   solRaised: number
   solTarget: number
@@ -494,14 +662,11 @@ export function bondProgress(input: {
   minCallouts: number
   bonded?: boolean
 }): FormattedMessage {
-  const ticker = displayToken(input.token)
   const bar = progressBar(input.percent)
   const fill = `${formatSol(input.solRaised)} / ${formatSol(input.solTarget)} SOL`
   const status = input.bonded || input.percent >= 100 ? "BONDED" : `${input.percent}%`
   const text = [
     "🧬 BOND",
-    "",
-    ticker,
     "",
     `${bar} ${status}`,
     fill,
@@ -510,8 +675,6 @@ export function bondProgress(input: {
   ].join("\n")
   const html = [
     `🧬 ${bold("BOND")}`,
-    "",
-    bold(ticker),
     "",
     `${code(bar)} ${bold(status)}`,
     escapeHtml(fill),
@@ -522,13 +685,11 @@ export function bondProgress(input: {
 }
 
 export function migrationDetected(input: {
-  token: string
   eligibleCount: number
   holderCount?: number
   bonusAmount: number
   distributionToken: string
 }): FormattedMessage {
-  const ticker = displayToken(input.token)
   const amount = formatAmount(input.bonusAmount, input.distributionToken)
   const holders =
     input.holderCount == null
@@ -536,8 +697,6 @@ export function migrationDetected(input: {
       : `${input.holderCount} still holding (${input.eligibleCount} eligible)`
   const text = [
     "🚀 BONDED",
-    "",
-    ticker,
     "",
     "Pump.fun curve complete.",
     holders,
@@ -548,8 +707,6 @@ export function migrationDetected(input: {
   ].join("\n")
   const html = [
     `🚀 ${bold("BONDED")}`,
-    "",
-    bold(ticker),
     "",
     "Pump.fun curve complete.",
     escapeHtml(holders),

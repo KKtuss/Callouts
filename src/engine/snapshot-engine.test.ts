@@ -22,7 +22,7 @@ class ScriptedRandom implements SecureRandom {
 }
 
 class RecordingBroadcast implements Broadcast {
-  readonly sequence: Array<{ op: "send" | "edit"; kind: string; text: string }> = []
+  readonly sequence: Array<{ op: "send" | "edit" | "delete"; kind: string; text: string }> = []
   private readonly inner = new PreviewBroadcast()
 
   getMessages() {
@@ -37,6 +37,25 @@ class RecordingBroadcast implements Broadcast {
   async edit(id: string, message: FormattedMessage) {
     this.sequence.push({ op: "edit", kind: message.kind, text: message.text })
     return this.inner.edit(id, message)
+  }
+
+  async delete(id: string) {
+    const current = this.inner.getMessages().find((item) => item.id === id)
+    this.sequence.push({
+      op: "delete",
+      kind: current?.kind ?? "unknown",
+      text: current?.text ?? "",
+    })
+    await this.inner.delete(id)
+  }
+
+  async clear(options?: { purgeTelegram?: number }) {
+    this.sequence.push({
+      op: "delete",
+      kind: "clear",
+      text: `purge=${options?.purgeTelegram ?? 0}`,
+    })
+    await this.inner.clear(options)
   }
 
   async disablePublicCommands() {
@@ -145,13 +164,17 @@ describe("SnapshotEngine broadcast lifecycle", () => {
 
     const selected = broadcast.sequence.find((item) => item.text.includes("SELECTED"))
     expect(selected?.text).toContain(audit.rouletteWinner.callerUsername)
-    expect(selected?.text).toContain("$BONK")
+    expect(selected?.text).not.toContain("$BONK")
 
-    const final = broadcast.sequence.find((item) => item.kind === "final")
-    expect(final?.text).toContain("Last Callout")
-    expect(final?.text).toContain("Roulette Winner")
-    expect(final?.text).toContain("Randomized between")
-    expect(final?.text).toMatch(/TX:/)
+    const final = broadcast.sequence.filter((item) => item.kind === "final")
+    expect(final.some((item) => item.op === "send")).toBe(true)
+    const complete = final.find((item) => item.text.includes("Randomized between"))
+    expect(complete?.text).toContain("PAYOUT")
+    expect(complete?.text).toContain("Last callout")
+    expect(complete?.text).toContain("Roulette winner")
+    expect(complete?.text).toMatch(/TX:/)
+    expect(broadcast.sequence.filter((item) => item.kind === "recipients")).toHaveLength(0)
+    expect(broadcast.sequence.filter((item) => item.kind === "distribution")).toHaveLength(0)
 
     expect(audit.calloutCount).toBe(4)
     expect(audit.rouletteCandidatePool.length).toBeGreaterThan(0)
@@ -381,7 +404,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     expect(audit?.transactions.every((tx) => tx.status === "confirmed")).toBe(true)
   })
 
-  it("notifies the channel for each new unique caller in the current snapshot window", () => {
+  it("delete-reposts one QUALIFIED board as the eligible list grows", async () => {
     const collector = new CalloutCollector()
     const broadcast = new RecordingBroadcast()
     const store = new EngineStore(
@@ -407,6 +430,8 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       source: "private-ingest",
       capturedAt: "2026-09-19T17:01:00.000Z",
     })
+    await engine.flushQualifiedNotices()
+
     expect(() =>
       engine.ingestCallout({
         callerUsername: "alpha",
@@ -415,16 +440,24 @@ describe("SnapshotEngine broadcast lifecycle", () => {
         capturedAt: "2026-09-19T17:02:00.000Z",
       }),
     ).toThrow(DuplicateCalloutError)
+
     engine.ingestCallout({
       callerUsername: "beta",
       wallet: walletB,
       source: "private-ingest",
-      capturedAt: "2026-09-19T16:50:00.000Z",
+      capturedAt: "2026-09-19T17:03:00.000Z",
     })
+    await engine.flushQualifiedNotices()
 
     const qualified = broadcast.sequence.filter((item) => item.kind === "qualified")
-    expect(qualified).toHaveLength(1)
+    expect(qualified.filter((item) => item.op === "send")).toHaveLength(2)
+    expect(qualified.filter((item) => item.op === "delete")).toHaveLength(1)
     expect(qualified[0].text).toContain("@alpha")
     expect(qualified[0].text).toContain("Eligible this snapshot: 1")
+    const latest = qualified.filter((item) => item.op === "send").at(-1)
+    expect(latest?.text).toContain("@alpha")
+    expect(latest?.text).toContain("@beta")
+    expect(latest?.text).toContain("Eligible this snapshot: 2")
+    expect(broadcast.getMessages().filter((item) => item.kind === "qualified")).toHaveLength(1)
   })
 })

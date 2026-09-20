@@ -194,9 +194,13 @@ export async function setWatchMint(rawMint: string): Promise<void> {
   if (current === mint) return
 
   const meta = await fetchCoinMetadata(mint)
+  // Full board reset: Telegram history, audits, callout pool, poller caches.
+  await runtime.engine.resetForMintChange()
   runtime.collector.clear()
   runtime.pumpPoller.reset()
   runtime.axiomPoller?.reset()
+  const switchedAt = new Date().toISOString()
+  runtime.store.resetHistoryForMint(switchedAt)
   const axiomReady = Boolean(runtime.axiomPoller?.status().cookieConfigured)
   runtime.store.config = {
     ...runtime.store.config,
@@ -218,8 +222,6 @@ export async function setWatchMint(rawMint: string): Promise<void> {
       cookieConfigured: axiomReady,
     }
   }
-  runtime.store.lastSnapshotAt = new Date().toISOString()
-  runtime.store.resetMigrationForMint(runtime.store.lastSnapshotAt)
   runtime.store.pumpIngest.enabled = true
   runtime.store.axiomIngest.enabled = runtime.store.config.axiomIngestEnabled
   runtime.store.axiomIngest.cookieConfigured = axiomReady
@@ -231,6 +233,7 @@ export async function setWatchMint(rawMint: string): Promise<void> {
   } else {
     runtime.store.log("info", `Watching callouts for ${mint}`)
   }
+  runtime.store.log("info", "Mint changed — Telegram channel and round history wiped.")
   runtime.pumpPoller.start()
   void runtime.pumpPoller.pollOnce()
   if (runtime.store.config.axiomIngestEnabled && runtime.axiomPoller) {

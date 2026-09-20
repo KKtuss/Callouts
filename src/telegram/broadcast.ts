@@ -5,6 +5,9 @@ import type { FormattedMessage } from "@/telegram/messages"
 export interface Broadcast {
   send(message: FormattedMessage): Promise<ChannelMessage>
   edit(id: string, message: FormattedMessage): Promise<ChannelMessage>
+  delete(id: string): Promise<void>
+  /** Drop tracked messages. Optionally also delete recent Telegram channel posts. */
+  clear(options?: { purgeTelegram?: number }): Promise<void>
   disablePublicCommands(): Promise<void>
   getMessages(): ChannelMessage[]
 }
@@ -66,6 +69,18 @@ export class PreviewBroadcast implements Broadcast {
     this.messages = this.messages.map((item, i) => (i === index ? updated : item))
     this.emit()
     return { ...updated }
+  }
+
+  async delete(id: string): Promise<void> {
+    const before = this.messages.length
+    this.messages = this.messages.filter((item) => item.id !== id)
+    if (this.messages.length !== before) this.emit()
+  }
+
+  async clear(_options?: { purgeTelegram?: number }): Promise<void> {
+    if (this.messages.length === 0) return
+    this.messages = []
+    this.emit()
   }
 
   async disablePublicCommands(): Promise<void> {
@@ -140,6 +155,72 @@ export class TelegramBroadcast implements Broadcast {
     }
     this.local.set(id, updated)
     return updated
+  }
+
+  async delete(id: string): Promise<void> {
+    const current = this.local.get(id)
+    const telegramId = current?.telegramMessageId ?? Number(id)
+    if (!Number.isFinite(telegramId)) {
+      this.local.delete(id)
+      return
+    }
+    try {
+      await this.api("deleteMessage", {
+        chat_id: this.chatId,
+        message_id: telegramId,
+      })
+    } finally {
+      this.local.delete(id)
+    }
+  }
+
+  async clear(options?: { purgeTelegram?: number }): Promise<void> {
+    const tracked = [...this.local.keys()]
+    for (const id of tracked) {
+      try {
+        await this.delete(id)
+      } catch {
+        this.local.delete(id)
+      }
+    }
+    const purge = options?.purgeTelegram ?? 0
+    if (purge > 0) await this.purgeRecentChannelPosts(purge)
+  }
+
+  /**
+   * Telegram has no “list my posts” API. Probe the latest message id, then
+   * walk backward deleting what we can (bot-authored channel posts).
+   */
+  private async purgeRecentChannelPosts(count: number) {
+    const limit = Math.max(0, Math.min(Math.floor(count), 500))
+    if (limit === 0) return
+
+    let tip = 0
+    try {
+      const probe = await this.api("sendMessage", {
+        chat_id: this.chatId,
+        text: "·",
+        disable_notification: true,
+        disable_web_page_preview: true,
+      })
+      tip = probe.result.message_id
+      try {
+        await this.api("deleteMessage", { chat_id: this.chatId, message_id: tip })
+      } catch {
+        /* tip may already be gone */
+      }
+    } catch (error) {
+      console.error("[telegram] channel purge probe failed", error)
+      return
+    }
+
+    for (let id = tip; id > tip - limit && id > 0; id -= 1) {
+      try {
+        await this.api("deleteMessage", { chat_id: this.chatId, message_id: id })
+      } catch {
+        /* not ours / already deleted / too old */
+      }
+    }
   }
 
   async disablePublicCommands(): Promise<void> {
@@ -225,6 +306,29 @@ class DualBroadcast implements Broadcast {
       }
     }
     return local
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.preview.delete(id)
+    const remoteId = this.map.get(id)
+    this.map.delete(id)
+    if (remoteId) {
+      try {
+        await this.telegram.delete(remoteId)
+      } catch (error) {
+        console.error("[telegram] delete failed; preview still removed", error)
+      }
+    }
+  }
+
+  async clear(options?: { purgeTelegram?: number }): Promise<void> {
+    this.map.clear()
+    await this.preview.clear()
+    try {
+      await this.telegram.clear(options)
+    } catch (error) {
+      console.error("[telegram] clear failed; preview still wiped", error)
+    }
   }
 
   async disablePublicCommands(): Promise<void> {

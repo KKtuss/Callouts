@@ -25,6 +25,7 @@ type IngestFn = (input: {
   capturedAt?: string
   id?: string
   thesis?: string
+  silent?: boolean
 }) => Callout
 
 export class AxiomCalloutPoller {

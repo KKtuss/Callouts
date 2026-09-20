@@ -136,7 +136,19 @@
   html {
     @apply font-sans;
     overflow-anchor: none;
-    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html {
+      scroll-behavior: smooth;
+    }
+  }
+
+  /* Smooth scroll fights touch swipes on phones */
+  @media (hover: none) and (pointer: coarse) {
+    html {
+      scroll-behavior: auto;
+    }
   }
 }
 
@@ -311,6 +323,12 @@
     backdrop-filter: blur(18px) saturate(1.3);
   }
 
+  @media (hover: none) and (pointer: coarse) {
+    .aqua-panel {
+      backdrop-filter: blur(8px) saturate(1.15);
+    }
+  }
+
   /* Glossy blue plastic button, same material as the logo */
   .aqua-button {
     position: relative;
@@ -404,19 +422,28 @@
   }
 
   /*
-   * Snapshot feed: fixed 3-card height so the engine panel can stretch to match.
-   * No backdrop-filter cards inside overflow — Chromium paints a dark clip band.
+   * Snapshot feed: desktop locks to 3 cards so the engine panel can match.
+   * Phones keep overflow visible so page swipes aren’t trapped in a nested scroller.
    */
   .live-board-grid {
     --rounds-feed-h: calc(3 * 179px + 2 * 1rem + 6px);
   }
 
   .rounds-scroll {
-    height: var(--rounds-feed-h);
-    max-height: var(--rounds-feed-h);
-    overflow-x: hidden;
-    overflow-y: auto;
-    overscroll-behavior: contain;
+    max-height: none;
+    overflow: visible;
+    overscroll-behavior: auto;
+  }
+
+  @media (min-width: 1024px) {
+    .rounds-scroll {
+      height: var(--rounds-feed-h);
+      max-height: var(--rounds-feed-h);
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+    }
   }
 
   .round-card {
@@ -430,12 +457,6 @@
         rgb(200 228 252 / 0.55) 100%
       );
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.95);
-  }
-
-  @media (max-width: 639px) {
-    .live-board-grid {
-      --rounds-feed-h: calc(3 * 15.5rem + 2 * 1rem);
-    }
   }
 
   /* Water spheres from the banner */
@@ -493,9 +514,9 @@
 
   /* Circular flywheel — ring diameter matches spoke radius so it cuts through chips */
   .flywheel {
-    --flywheel-radius: clamp(6.5rem, 30vw, 10rem);
+    --flywheel-radius: clamp(4.75rem, 26vw, 10rem);
     position: relative;
-    width: calc(var(--flywheel-radius) * 2 + 6.5rem);
+    width: calc(var(--flywheel-radius) * 2 + 4.75rem);
     max-width: 100%;
     aspect-ratio: 1;
     margin-inline: auto;
@@ -553,12 +574,12 @@
     left: 50%;
     top: 50%;
     width: max-content;
-    max-width: 8.25rem;
+    max-width: 6.75rem;
     transform: translate(-50%, -50%);
     border-radius: 999px;
-    padding: 0.45rem 0.7rem;
+    padding: 0.4rem 0.55rem;
     text-align: center;
-    font-size: 0.65rem;
+    font-size: 0.58rem;
     font-weight: 600;
     line-height: 1.25;
     color: var(--shill-deep);
@@ -578,11 +599,12 @@
   }
 
   .flywheel-punch {
-    font-size: clamp(1.85rem, 4.4vw, 2.65rem);
+    font-size: clamp(1.35rem, 7vw, 2.65rem);
     font-weight: 800;
     letter-spacing: -0.01em;
     line-height: 1.05;
     text-transform: uppercase;
+    white-space: nowrap;
     background: linear-gradient(180deg, #8fd0ff 0%, #2f8fff 45%, #1566c8 100%);
     -webkit-background-clip: text;
     background-clip: text;
@@ -591,6 +613,22 @@
     filter:
       drop-shadow(0 1px 0 rgb(255 255 255 / 0.65))
       drop-shadow(0 3px 10px rgb(8 60 120 / 0.22));
+    width: fit-content;
+    margin-inline: auto;
+  }
+
+  /* Heads sit on the panel’s bottom edge; size tracks the viewport */
+  .flywheel-stage {
+    --flywheel-head-w: clamp(3.5rem, 23vw, 13.5rem);
+  }
+
+  .aqua-panel.flywheel-panel {
+    padding-bottom: calc(var(--flywheel-head-w) * 0.28);
+  }
+
+  .flywheel-head {
+    width: var(--flywheel-head-w);
+    height: auto;
   }
 
   @keyframes flywheel-spin {
@@ -604,6 +642,14 @@
       max-width: 9.75rem;
       padding: 0.55rem 0.85rem;
       font-size: 0.72rem;
+    }
+
+    .flywheel-stage {
+      --flywheel-head-w: clamp(9.5rem, 18vw, 13.5rem);
+    }
+
+    .aqua-panel.flywheel-panel {
+      padding-bottom: calc(var(--flywheel-head-w) * 0.32);
     }
   }
 }

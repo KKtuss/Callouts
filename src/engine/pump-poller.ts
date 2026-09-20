@@ -25,6 +25,7 @@ type IngestFn = (input: {
   capturedAt?: string
   id?: string
   thesis?: string
+  silent?: boolean
 }) => Callout
 
 const FETCH_INIT: RequestInit = {
@@ -104,6 +105,8 @@ export class PumpCalloutPoller {
     }
     this.resetWindowCounters()
 
+    // Historical catch-up still counts toward the window, but must not spam QUALIFIED.
+    const silent = this.needsBackfill
     const rows = await this.loadMintCallouts(mint)
     this.lastFeedCount = rows.length
     const windowStartMs = this.windowStart().getTime()
@@ -120,6 +123,7 @@ export class PumpCalloutPoller {
           capturedAt: new Date(row.createdAtMs).toISOString(),
           id: `pump_${row.calloutId}`,
           thesis: row.thesis,
+          silent,
         })
         this.seenIds.add(row.calloutId)
         if (row.createdAtMs >= windowStartMs) this.accepted += 1

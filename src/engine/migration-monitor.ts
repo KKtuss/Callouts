@@ -10,7 +10,6 @@ import { nodeSecureRandom, type SecureRandom } from "@/lib/crypto-random"
 import type { Clock } from "@/engine/snapshot-engine"
 import type { Broadcast } from "@/telegram/broadcast"
 import {
-  bondProgress,
   distributionConfirmed,
   distributionPreparing,
   distributionSending,
@@ -24,9 +23,6 @@ export class MigrationMonitor {
   private timer: ReturnType<typeof setTimeout> | null = null
   private stopped = true
   private running = false
-  private watchedMint: string | null = null
-  private bondMessageId: string | null = null
-  private lastBondText: string | null = null
 
   constructor(
     private readonly store: EngineStore,
@@ -70,11 +66,6 @@ export class MigrationMonitor {
       return null
     }
 
-    if (this.watchedMint !== mint) {
-      this.resetBondBroadcast()
-      this.watchedMint = mint
-    }
-
     const candidates = buildMigrationCandidates(this.collector.all(), cfg.migrationMinCallouts)
     this.store.migrationEligibleCount = candidates.length
 
@@ -90,7 +81,6 @@ export class MigrationMonitor {
     }
 
     this.applyBondProgress(status)
-    await this.publishBondProgress(status, candidates.length)
     this.store.migrationLastCheckAt = this.clock.now().toISOString()
     if (!status.migrated) {
       this.store.emitState()
@@ -131,11 +121,9 @@ export class MigrationMonitor {
       completedAt: null,
     }
     this.store.upsertMigration(audit)
-    if (this.bondMessageId) audit.telegramMessageIds.bond = this.bondMessageId
 
     await this.publishQuietly(
       migrationDetected({
-        token: cfg.distributionToken,
         eligibleCount: candidates.length,
         bonusAmount: cfg.migrationBonusAmount,
         distributionToken: cfg.distributionToken,
@@ -271,40 +259,6 @@ export class MigrationMonitor {
     this.store.migrationProgressPercent = status.progressPercent
     this.store.migrationSolRaised = status.solRaised
     this.store.migrationSolTarget = status.solTarget
-  }
-
-  private resetBondBroadcast() {
-    this.bondMessageId = null
-    this.lastBondText = null
-  }
-
-  private async publishBondProgress(status: CoinBondingStatus, eligibleCount: number) {
-    if (!this.broadcast) return
-    if (this.watchedMint !== status.mint) {
-      this.resetBondBroadcast()
-      this.watchedMint = status.mint
-    }
-    const message = bondProgress({
-      token: this.store.config.distributionToken,
-      percent: status.progressPercent,
-      solRaised: status.solRaised,
-      solTarget: status.solTarget,
-      eligibleCount,
-      minCallouts: this.store.config.migrationMinCallouts,
-      bonded: status.migrated,
-    })
-    if (message.text === this.lastBondText) return
-    try {
-      if (!this.bondMessageId) {
-        const sent = await this.broadcast.send(message)
-        this.bondMessageId = sent.id
-      } else {
-        await this.broadcast.edit(this.bondMessageId, message)
-      }
-      this.lastBondText = message.text
-    } catch (error) {
-      this.store.log("warn", error instanceof Error ? error.message : "Bond progress publish failed")
-    }
   }
 
   private explorer() {
