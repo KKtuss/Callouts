@@ -6,7 +6,7 @@ import { buildRouletteFrames } from "@/engine/roulette-animation"
 import { EngineStore } from "@/engine/store"
 import { txPending, type Treasury } from "@/engine/treasury"
 import { resolveCalloutToken } from "@/lib/coin"
-import { canonicalToken, tokensMatch } from "@/lib/format"
+import { canonicalToken, minutesLabel, tokensMatch } from "@/lib/format"
 import type {
   Callout,
   DistributionTx,
@@ -15,8 +15,9 @@ import type {
   SnapshotAudit,
   SnapshotTrigger,
 } from "@/engine/types"
-import type { Broadcast } from "@/telegram/broadcast"
+import type { Broadcast, ChannelIntroPayload } from "@/telegram/broadcast"
 import {
+  channelIntro,
   qualifiedCaller,
   rouletteSelected,
   rouletteSpin,
@@ -126,8 +127,42 @@ export class SnapshotEngine {
 
   start() {
     void this.broadcast.disablePublicCommands()
+    void this.publishChannelIntro()
     this.armScheduler(this.firstDelay())
     this.store.log("info", "Snapshot engine started. Telegram is broadcast-only.")
+  }
+
+  /** Permanent pinned intro — survives mint resets. */
+  async publishChannelIntro() {
+    const cfg = this.config
+    const ticker = cfg.distributionToken || "SHILL"
+    const mint = cfg.coinMint
+    const siteUrl =
+      process.env.NEXT_PUBLIC_SITE_URL?.trim() ||
+      (process.env.VERCEL_PROJECT_PRODUCTION_URL
+        ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+        : "https://callout-beta.vercel.app")
+    const telegramUrl = process.env.NEXT_PUBLIC_TELEGRAM_URL?.trim() || null
+    const xUrl = process.env.NEXT_PUBLIC_X_URL?.trim() || null
+    const payload: ChannelIntroPayload = {
+      tokenName: cfg.coinName,
+      ticker,
+      mint,
+      windowLabel: minutesLabel(cfg.snapshotMinMs, cfg.snapshotMaxMs),
+      siteUrl,
+      telegramUrl,
+      xUrl,
+      pumpUrl: mint ? `https://pump.fun/coin/${mint}` : null,
+    }
+    const message = channelIntro(payload)
+    try {
+      await this.broadcast.ensureIntro(payload, message)
+    } catch (error) {
+      this.store.log(
+        "warn",
+        error instanceof Error ? error.message : "Failed to publish Telegram intro",
+      )
+    }
   }
 
   stop() {
@@ -292,6 +327,7 @@ export class SnapshotEngine {
   /**
    * Mint switch: wipe the Telegram channel board + local qualified tracking.
    * Purges recent channel posts (bots cannot list history).
+   * The pinned intro is protected and refreshed afterward.
    */
   async resetForMintChange() {
     await this.qualifiedBoardChain
@@ -299,6 +335,7 @@ export class SnapshotEngine {
     this.qualifiedWindowKey = ""
     this.qualifiedMessageId = null
     await this.broadcast.clear({ purgeTelegram: 400 })
+    await this.publishChannelIntro()
   }
 
   private async repostQualifiedBoard(

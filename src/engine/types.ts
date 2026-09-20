@@ -85,6 +85,7 @@ export type SnapshotAudit = {
 }
 
 export type ChannelMessageKind =
+  | "intro"
   | "snapshot"
   | "roulette"
   | "recipients"

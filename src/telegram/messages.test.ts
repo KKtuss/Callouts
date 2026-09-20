@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { FORBIDDEN_PUBLIC_COMMANDS, ignoreInboundUpdate, isForbiddenPublicCommand } from "@/telegram/commands"
 import {
   bondProgress,
+  channelIntro,
   qualifiedCaller,
   rouletteSelected,
   snapshotAnnouncement,
@@ -77,6 +78,26 @@ describe("public Telegram surface", () => {
     expect(final.text).toContain("Next snapshot")
     expect(final.html).toContain("href=")
     expect(final.text).not.toMatch(/\/status|\/balance|\/config/)
+  })
+
+  it("formats the permanent channel intro without control affordances", () => {
+    const intro = channelIntro({
+      tokenName: "The Day Trader",
+      ticker: "AIDEN",
+      mint: "4i5FqkfYDAPcEVcXyuVyaaBcz3bpwJPqDkmaF36kpump",
+      windowLabel: "5–15 minutes",
+      siteUrl: "https://callout-beta.vercel.app",
+      telegramUrl: "https://t.me/example",
+      xUrl: "https://x.com/example",
+      pumpUrl: "https://pump.fun/coin/4i5FqkfYDAPcEVcXyuVyaaBcz3bpwJPqDkmaF36kpump",
+    })
+    expect(intro.kind).toBe("intro")
+    expect(intro.text).toContain("SHILL")
+    expect(intro.text).toContain("The Day Trader ($AIDEN)")
+    expect(intro.text).toContain("Get some money where your mouth is.")
+    expect(intro.text).toContain("Website")
+    expect(intro.html).toContain("href=")
+    expect(intro.text).not.toMatch(/\/pause|\/admin/)
   })
 
   it("formats qualified-caller and bond-progress notices", () => {

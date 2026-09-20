@@ -1,6 +1,21 @@
+import { readFileSync, existsSync } from "node:fs"
+import path from "node:path"
 import { FORBIDDEN_PUBLIC_COMMANDS } from "@/telegram/commands"
 import type { ChannelMessage, ChannelMessageKind } from "@/engine/types"
 import type { FormattedMessage } from "@/telegram/messages"
+
+export type ChannelIntroPayload = {
+  tokenName: string | null
+  ticker: string
+  mint: string | null
+  windowLabel: string
+  siteUrl?: string | null
+  telegramUrl?: string | null
+  xUrl?: string | null
+  pumpUrl?: string | null
+  /** Absolute or cwd-relative path to the banner image. */
+  bannerPath?: string
+}
 
 export interface Broadcast {
   send(message: FormattedMessage): Promise<ChannelMessage>
@@ -8,6 +23,8 @@ export interface Broadcast {
   delete(id: string): Promise<void>
   /** Drop tracked messages. Optionally also delete recent Telegram channel posts. */
   clear(options?: { purgeTelegram?: number }): Promise<void>
+  /** Permanent pinned intro (banner + hero). Survives mint resets / purges. */
+  ensureIntro(payload: ChannelIntroPayload, message: FormattedMessage): Promise<ChannelMessage | null>
   disablePublicCommands(): Promise<void>
   getMessages(): ChannelMessage[]
 }
@@ -25,6 +42,7 @@ function newId(): string {
 export class PreviewBroadcast implements Broadcast {
   private messages: ChannelMessage[] = []
   private listeners = new Set<Listener>()
+  private introId: string | null = null
 
   onChange(listener: Listener): () => void {
     this.listeners.add(listener)
@@ -72,20 +90,42 @@ export class PreviewBroadcast implements Broadcast {
   }
 
   async delete(id: string): Promise<void> {
+    if (id === this.introId) return
     const before = this.messages.length
     this.messages = this.messages.filter((item) => item.id !== id)
     if (this.messages.length !== before) this.emit()
   }
 
   async clear(_options?: { purgeTelegram?: number }): Promise<void> {
-    if (this.messages.length === 0) return
-    this.messages = []
+    const intro = this.introId
+      ? this.messages.find((item) => item.id === this.introId) ?? null
+      : null
+    this.messages = intro ? [intro] : []
     this.emit()
   }
 
+  async ensureIntro(
+    _payload: ChannelIntroPayload,
+    message: FormattedMessage,
+  ): Promise<ChannelMessage | null> {
+    if (this.introId) {
+      try {
+        return await this.edit(this.introId, message)
+      } catch {
+        this.introId = null
+      }
+    }
+    const existing = this.messages.find((item) => item.kind === "intro")
+    if (existing) {
+      this.introId = existing.id
+      return this.edit(existing.id, message)
+    }
+    const sent = await this.send(message)
+    this.introId = sent.id
+    return sent
+  }
+
   async disablePublicCommands(): Promise<void> {
-    // Preview has no command menu. Presence of forbidden names is a hard error
-    // so we never accidentally grow a public control surface.
     for (const command of FORBIDDEN_PUBLIC_COMMANDS) {
       if (command.length === 0) {
         throw new Error("Invalid forbidden command list")
@@ -101,11 +141,16 @@ export class PreviewBroadcast implements Broadcast {
 
 export class TelegramBroadcast implements Broadcast {
   private local = new Map<string, ChannelMessage>()
+  /** Telegram message ids that must never be purged (pinned intro). */
+  private protectedIds = new Set<number>()
 
   constructor(
     private readonly token: string,
     private readonly chatId: string,
-  ) {}
+  ) {
+    const fromEnv = Number(process.env.TELEGRAM_INTRO_MESSAGE_ID ?? "")
+    if (Number.isFinite(fromEnv) && fromEnv > 0) this.protectedIds.add(fromEnv)
+  }
 
   getMessages(): ChannelMessage[] {
     return [...this.local.values()]
@@ -164,6 +209,7 @@ export class TelegramBroadcast implements Broadcast {
       this.local.delete(id)
       return
     }
+    if (this.protectedIds.has(telegramId)) return
     try {
       await this.api("deleteMessage", {
         chat_id: this.chatId,
@@ -175,8 +221,9 @@ export class TelegramBroadcast implements Broadcast {
   }
 
   async clear(options?: { purgeTelegram?: number }): Promise<void> {
-    const tracked = [...this.local.keys()]
-    for (const id of tracked) {
+    const tracked = [...this.local.entries()]
+    for (const [id, message] of tracked) {
+      if (message.telegramMessageId && this.protectedIds.has(message.telegramMessageId)) continue
       try {
         await this.delete(id)
       } catch {
@@ -187,11 +234,134 @@ export class TelegramBroadcast implements Broadcast {
     if (purge > 0) await this.purgeRecentChannelPosts(purge)
   }
 
+  async ensureIntro(
+    payload: ChannelIntroPayload,
+    message: FormattedMessage,
+  ): Promise<ChannelMessage | null> {
+    await this.refreshProtectedFromPin()
+
+    const existingId = [...this.protectedIds][0] ?? null
+    if (existingId) {
+      const edited = await this.tryEditIntro(existingId, message)
+      if (edited) return edited
+    }
+
+    const banner = resolveBannerPath(payload.bannerPath)
+    const sent = banner
+      ? await this.sendPhoto(banner, message)
+      : await this.send(message)
+
+    const telegramId = sent.telegramMessageId
+    if (telegramId) {
+      this.protectedIds.add(telegramId)
+      try {
+        await this.api("pinChatMessage", {
+          chat_id: this.chatId,
+          message_id: telegramId,
+          disable_notification: true,
+        })
+      } catch (error) {
+        console.error("[telegram] failed to pin intro", error)
+      }
+    }
+    return sent
+  }
+
+  private async tryEditIntro(
+    telegramId: number,
+    message: FormattedMessage,
+  ): Promise<ChannelMessage | null> {
+    try {
+      await this.api("editMessageCaption", {
+        chat_id: this.chatId,
+        message_id: telegramId,
+        caption: message.html,
+        parse_mode: "HTML",
+      })
+    } catch {
+      try {
+        await this.api("editMessageText", {
+          chat_id: this.chatId,
+          message_id: telegramId,
+          text: message.html,
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+        })
+      } catch (error) {
+        console.error("[telegram] failed to refresh intro", error)
+        return null
+      }
+    }
+    const updated: ChannelMessage = {
+      id: String(telegramId),
+      telegramMessageId: telegramId,
+      kind: "intro",
+      html: message.html,
+      text: message.text,
+      createdAt: new Date().toISOString(),
+      editedAt: new Date().toISOString(),
+      editCount: 1,
+    }
+    this.local.set(updated.id, updated)
+    this.protectedIds.add(telegramId)
+    return updated
+  }
+
+  private async sendPhoto(filePath: string, message: FormattedMessage): Promise<ChannelMessage> {
+    const bytes = readFileSync(filePath)
+    const form = new FormData()
+    form.append("chat_id", this.chatId)
+    form.append("caption", message.html)
+    form.append("parse_mode", "HTML")
+    form.append("disable_notification", "false")
+    form.append("photo", new Blob([bytes], { type: "image/png" }), path.basename(filePath))
+
+    const response = await fetch(`https://api.telegram.org/bot${this.token}/sendPhoto`, {
+      method: "POST",
+      body: form,
+    })
+    const payload = (await response.json()) as {
+      ok: boolean
+      description?: string
+      result: { message_id: number }
+    }
+    if (!payload.ok) {
+      throw new Error(payload.description ?? "Telegram sendPhoto failed")
+    }
+    const stored: ChannelMessage = {
+      id: String(payload.result.message_id),
+      telegramMessageId: payload.result.message_id,
+      kind: message.kind,
+      html: message.html,
+      text: message.text,
+      createdAt: new Date().toISOString(),
+      editedAt: null,
+      editCount: 0,
+    }
+    this.local.set(stored.id, stored)
+    return stored
+  }
+
+  private async refreshProtectedFromPin() {
+    try {
+      const chat = await this.api("getChat", { chat_id: this.chatId })
+      const pinnedId = (chat.result as { pinned_message?: { message_id?: number } })?.pinned_message
+        ?.message_id
+      if (pinnedId) this.protectedIds.add(pinnedId)
+    } catch {
+      /* ignore */
+    }
+    const fromEnv = Number(process.env.TELEGRAM_INTRO_MESSAGE_ID ?? "")
+    if (Number.isFinite(fromEnv) && fromEnv > 0) this.protectedIds.add(fromEnv)
+  }
+
   /**
    * Telegram has no “list my posts” API. Probe the latest message id, then
    * walk backward deleting what we can (bot-authored channel posts).
+   * Protected / pinned intro ids are skipped.
    */
   private async purgeRecentChannelPosts(count: number) {
+    await this.refreshProtectedFromPin()
     const limit = Math.max(0, Math.min(Math.floor(count), 500))
     if (limit === 0) return
 
@@ -215,6 +385,7 @@ export class TelegramBroadcast implements Broadcast {
     }
 
     for (let id = tip; id > tip - limit && id > 0; id -= 1) {
+      if (this.protectedIds.has(id)) continue
       try {
         await this.api("deleteMessage", { chat_id: this.chatId, message_id: id })
       } catch {
@@ -250,7 +421,24 @@ export class TelegramBroadcast implements Broadcast {
   }
 }
 
-export function createBroadcast(): { preview: PreviewBroadcast; broadcast: Broadcast; telegramConnected: boolean; channelId: string | null } {
+function resolveBannerPath(explicit?: string): string | null {
+  const candidates = [
+    explicit,
+    path.join(process.cwd(), "public", "brand", "logo.png"),
+    path.join(process.cwd(), "public", "brand", "shill-mark.png"),
+  ].filter(Boolean) as string[]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+export function createBroadcast(): {
+  preview: PreviewBroadcast
+  broadcast: Broadcast
+  telegramConnected: boolean
+  channelId: string | null
+} {
   const preview = new PreviewBroadcast()
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim()
   const channelId = process.env.TELEGRAM_CHANNEL_ID?.trim()
@@ -322,12 +510,34 @@ class DualBroadcast implements Broadcast {
   }
 
   async clear(options?: { purgeTelegram?: number }): Promise<void> {
-    this.map.clear()
     await this.preview.clear()
+    // Keep map entries that still exist in preview (intro).
+    const keep = new Set(this.preview.getMessages().map((item) => item.id))
+    for (const key of [...this.map.keys()]) {
+      if (!keep.has(key)) this.map.delete(key)
+    }
     try {
       await this.telegram.clear(options)
     } catch (error) {
       console.error("[telegram] clear failed; preview still wiped", error)
+    }
+  }
+
+  async ensureIntro(
+    payload: ChannelIntroPayload,
+    message: FormattedMessage,
+  ): Promise<ChannelMessage | null> {
+    const local = await this.preview.ensureIntro(payload, message)
+    try {
+      const remote = await this.telegram.ensureIntro(payload, message)
+      if (local && remote) {
+        this.map.set(local.id, remote.id)
+        return { ...local, telegramMessageId: remote.telegramMessageId }
+      }
+      return local
+    } catch (error) {
+      console.error("[telegram] intro failed; preview still published", error)
+      return local
     }
   }
 

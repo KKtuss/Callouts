@@ -58,6 +58,11 @@ class RecordingBroadcast implements Broadcast {
     await this.inner.clear(options)
   }
 
+  async ensureIntro(_payload: Parameters<Broadcast["ensureIntro"]>[0], message: FormattedMessage) {
+    this.sequence.push({ op: "send", kind: message.kind, text: message.text })
+    return this.inner.ensureIntro(_payload, message)
+  }
+
   async disablePublicCommands() {
     await this.inner.disablePublicCommands()
   }

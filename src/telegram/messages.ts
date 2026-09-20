@@ -1,6 +1,7 @@
 import { explorerAddressUrl, explorerTxUrl } from "@/lib/explorer"
 import {
   DIVIDER,
+  displayToken,
   displayUsername,
   escapeHtml,
   formatAmount,
@@ -38,6 +39,87 @@ function link(label: string, href: string): string {
 export type ExplorerLinks = {
   txTemplate?: string
   addressTemplate?: string
+}
+
+/** Permanent channel header — pinned, never purged. */
+export function channelIntro(input: {
+  tokenName: string | null
+  ticker: string
+  mint: string | null
+  windowLabel: string
+  siteUrl?: string | null
+  telegramUrl?: string | null
+  xUrl?: string | null
+  pumpUrl?: string | null
+}): FormattedMessage {
+  const name = input.tokenName?.trim() || null
+  const ticker = displayToken(input.ticker).replace(/^\$/, "") || "SHILL"
+  const tokenLine = name ? `${name} ($${ticker})` : `$${ticker}`
+  const mintShort = input.mint ? truncateWallet(input.mint, 4, 4) : null
+
+  const links: { label: string; href: string }[] = []
+  if (input.siteUrl) links.push({ label: "Website", href: input.siteUrl })
+  if (input.telegramUrl) links.push({ label: "Telegram", href: input.telegramUrl })
+  if (input.xUrl) links.push({ label: "X", href: input.xUrl })
+  if (input.pumpUrl) links.push({ label: "Pump.fun", href: input.pumpUrl })
+  if (input.mint) {
+    links.push({
+      label: "Solscan",
+      href: explorerAddressUrl(input.mint),
+    })
+  }
+
+  const text = [
+    "SHILL",
+    "Get some money where your mouth is.",
+    "",
+    DIVIDER,
+    "",
+    `Token: ${tokenLine}`,
+    mintShort ? `Mint: ${mintShort}` : "Mint: not set yet",
+    "",
+    DIVIDER,
+    "",
+    "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
+    "",
+    `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
+    "",
+    DIVIDER,
+    "",
+    "Links",
+    ...(links.length ? links.map((l) => `• ${l.label}: ${l.href}`) : ["• Coming soon"]),
+  ].join("\n")
+
+  const html = [
+    bold("SHILL"),
+    escapeHtml("Get some money where your mouth is."),
+    "",
+    DIVIDER,
+    "",
+    `Token: ${bold(tokenLine)}`,
+    mintShort
+      ? `Mint: ${link(mintShort, explorerAddressUrl(input.mint!))}`
+      : "Mint: not set yet",
+    "",
+    DIVIDER,
+    "",
+    escapeHtml(
+      "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
+    ),
+    "",
+    escapeHtml(
+      `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
+    ),
+    "",
+    DIVIDER,
+    "",
+    bold("Links"),
+    ...(links.length
+      ? links.map((l) => `• ${link(l.label, l.href)}`)
+      : ["• Coming soon"]),
+  ].join("\n")
+
+  return pair(html, text, "intro")
 }
 
 function walletLine(wallet: string, explorer?: ExplorerLinks): { html: string; text: string } {

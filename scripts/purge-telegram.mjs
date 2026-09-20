@@ -34,6 +34,28 @@ async function api(method, body) {
   return response.json()
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+const me = await api("getMe", {})
+const chat = await api("getChat", { chat_id: chatId })
+const pinnedId = chat.result?.pinned_message?.message_id ?? null
+const protectedIds = new Set(
+  [pinnedId, Number(env.TELEGRAM_INTRO_MESSAGE_ID ?? "")].filter(
+    (id) => Number.isFinite(id) && id > 0,
+  ),
+)
+
+console.log(
+  JSON.stringify({
+    bot: me.result?.username,
+    chat: chat.result?.title ?? chat.result?.username ?? chatId,
+    type: chat.result?.type,
+    protectedIds: [...protectedIds],
+  }),
+)
+
 const probe = await api("sendMessage", {
   chat_id: chatId,
   text: "·",
@@ -48,13 +70,52 @@ if (!probe.ok) {
 const tip = probe.result.message_id
 await api("deleteMessage", { chat_id: chatId, message_id: tip })
 
-const limit = Number(process.argv[2] ?? 400)
+const limit = Math.min(Number(process.argv[2] ?? tip), tip)
+const reasons = new Map()
 let deleted = 0
 let failed = 0
-for (let id = tip; id > tip - limit && id > 0; id -= 1) {
-  const result = await api("deleteMessage", { chat_id: chatId, message_id: id })
-  if (result.ok) deleted += 1
-  else failed += 1
+let skipped = 0
+
+for (let end = tip; end > tip - limit && end > 0; end -= 100) {
+  const start = Math.max(1, end - 99, tip - limit + 1)
+  const messageIds = []
+  for (let id = end; id >= start; id -= 1) {
+    if (protectedIds.has(id)) {
+      skipped += 1
+      continue
+    }
+    messageIds.push(id)
+  }
+  if (messageIds.length === 0) continue
+
+  const result = await api("deleteMessages", { chat_id: chatId, message_ids: messageIds })
+  if (result.ok) {
+    deleted += messageIds.length
+  } else {
+    const batchReason = result.description ?? "batch failed"
+    reasons.set(batchReason, (reasons.get(batchReason) ?? 0) + 1)
+    for (const id of messageIds) {
+      const one = await api("deleteMessage", { chat_id: chatId, message_id: id })
+      if (one.ok) {
+        deleted += 1
+      } else {
+        failed += 1
+        const why = one.description ?? "failed"
+        reasons.set(why, (reasons.get(why) ?? 0) + 1)
+      }
+      await sleep(20)
+    }
+  }
+  await sleep(40)
 }
 
-console.log(JSON.stringify({ tip, deleted, failed, limit }))
+console.log(
+  JSON.stringify({
+    tip,
+    limit,
+    deleted,
+    failed,
+    skipped,
+    reasons: Object.fromEntries([...reasons.entries()].slice(0, 8)),
+  }),
+)
