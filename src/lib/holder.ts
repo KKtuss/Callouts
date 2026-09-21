@@ -45,9 +45,9 @@ export async function filterHolders(
   mint: string,
   check: HolderCheck = walletHoldsMint,
 ): Promise<string[]> {
-  const holders: string[] = []
-  for (const wallet of wallets) {
-    if (await check(wallet, mint)) holders.push(wallet)
-  }
-  return holders
+  const unique = [...new Set(wallets)]
+  const held = await Promise.all(
+    unique.map(async (wallet) => ((await check(wallet, mint)) ? wallet : null)),
+  )
+  return held.filter((wallet): wallet is string => Boolean(wallet))
 }

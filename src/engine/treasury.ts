@@ -14,13 +14,38 @@ export type TreasuryResult = {
   signature: string
   explorerUrl: string
   confirmedAt: string
+  /** Present for live sends — used by the ops wallet console. */
+  walletTrace?: {
+    solBeforeLamports: number
+    solAfterLamports: number
+    tokenBefore: number | null
+    tokenAfter: number | null
+  }
+}
+
+export type CreatorFeeCollectResult = {
+  /** Null when nothing was submitted (mock mode, empty vault, or no ixs). */
+  signature: string | null
+  explorerUrl: string | null
+  claimedLamports: number
+  claimedSol: number
+  beforeLamports: number
+  afterLamports: number
+  instructionCount: number
+  skippedReason: string | null
 }
 
 export interface Treasury {
   publicAddress: string
   balance: number
   readonly keyConfigured: boolean
+  /** True when send() is a real (or test-mock) payout. False = dry run, do not lottery. */
+  readonly live: boolean
   setSecretKey(raw: string | null): void
+  /** Refresh on-chain balance when supported; mock treasuries are a no-op. */
+  refreshBalance(): Promise<number>
+  /** Sweep Pump bonding-curve + AMM creator fees into this wallet. */
+  collectCreatorFees(): Promise<CreatorFeeCollectResult>
   send(input: TreasurySendInput): Promise<TreasuryResult>
 }
 
@@ -52,6 +77,10 @@ export class MockTreasury implements Treasury {
     return this.secretKey !== null
   }
 
+  get live(): boolean {
+    return true
+  }
+
   setSecretKey(raw: string | null) {
     if (!raw?.trim()) {
       wipe(this.secretKey)
@@ -62,6 +91,25 @@ export class MockTreasury implements Treasury {
     wipe(this.secretKey)
     this.secretKey = parsed.secretKey
     this.publicAddress = parsed.publicAddress
+  }
+
+  async refreshBalance(): Promise<number> {
+    return this.balance
+  }
+
+  async collectCreatorFees(): Promise<CreatorFeeCollectResult> {
+    return {
+      signature: null,
+      explorerUrl: null,
+      claimedLamports: 0,
+      claimedSol: 0,
+      beforeLamports: 0,
+      afterLamports: 0,
+      instructionCount: 0,
+      skippedReason: this.keyConfigured
+        ? "Mock treasury — creator fee collect is a no-op"
+        : "Treasury private key not configured (mock mode)",
+    }
   }
 
   async send(input: TreasurySendInput): Promise<TreasuryResult> {

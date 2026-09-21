@@ -1,5 +1,5 @@
 import { requireAdmin } from "@/lib/admin-auth"
-import { getRuntime } from "@/engine/runtime"
+import { waitForRuntime } from "@/engine/runtime"
 
 export const dynamic = "force-dynamic"
 
@@ -8,10 +8,11 @@ export async function POST(request: Request) {
   if (denied) return denied
 
   try {
-    const audit = await getRuntime().migrationMonitor.pollOnce()
+    const { migrationMonitor, store } = await waitForRuntime()
+    const audit = await migrationMonitor.pollOnce()
     return Response.json({
       audit,
-      state: getRuntime().store.clientState(),
+      state: store.clientState(),
     })
   } catch (error) {
     return Response.json(

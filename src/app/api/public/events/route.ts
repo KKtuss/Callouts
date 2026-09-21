@@ -1,11 +1,11 @@
-import { getRuntime } from "@/engine/runtime"
+import { waitForRuntime } from "@/engine/runtime"
 import { toPublicView } from "@/lib/public-view"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
 
 export async function GET(request: Request) {
-  const { store } = getRuntime()
+  const { store } = await waitForRuntime()
   const encoder = new TextEncoder()
 
   const stream = new ReadableStream({

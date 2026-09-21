@@ -34,6 +34,11 @@ yarn-error.log*
 .env*
 !.env.example
 
+# local engine watch persistence
+.data/
+.fomo-session.json
+scripts/.fomo-inject.js
+
 # vercel
 .vercel
 

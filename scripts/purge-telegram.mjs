@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs"
 
+const envFile = process.env.ENV_FILE || ".env.local"
 const env = Object.fromEntries(
-  readFileSync(".env.local", "utf8")
+  readFileSync(envFile, "utf8")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#") && line.includes("="))
@@ -14,6 +15,7 @@ const env = Object.fromEntries(
       ) {
         value = value.slice(1, -1)
       }
+      value = value.replace(/\\r\\n/g, "").replace(/\r/g, "").trim()
       return [line.slice(0, i).trim(), value]
     }),
 )
@@ -41,10 +43,9 @@ function sleep(ms) {
 const me = await api("getMe", {})
 const chat = await api("getChat", { chat_id: chatId })
 const pinnedId = chat.result?.pinned_message?.message_id ?? null
+/** Only the live pin is kept. Stale TELEGRAM_INTRO_MESSAGE_ID copies get deleted. */
 const protectedIds = new Set(
-  [pinnedId, Number(env.TELEGRAM_INTRO_MESSAGE_ID ?? "")].filter(
-    (id) => Number.isFinite(id) && id > 0,
-  ),
+  [pinnedId].filter((id) => Number.isFinite(id) && id > 0),
 )
 
 console.log(

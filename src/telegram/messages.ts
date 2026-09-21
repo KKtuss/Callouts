@@ -1,6 +1,7 @@
 import { explorerAddressUrl, explorerTxUrl } from "@/lib/explorer"
 import {
   DIVIDER,
+  calloutSourceLabel,
   displayToken,
   displayUsername,
   escapeHtml,
@@ -41,6 +42,8 @@ export type ExplorerLinks = {
   addressTemplate?: string
 }
 
+export const WAITING_FOR_SHILL = "Waiting for SHILL tech to be live..."
+
 /** Permanent channel header — pinned, never purged. */
 export function channelIntro(input: {
   tokenName: string | null
@@ -52,67 +55,77 @@ export function channelIntro(input: {
   xUrl?: string | null
   pumpUrl?: string | null
 }): FormattedMessage {
-  const name = input.tokenName?.trim() || null
-  const ticker = displayToken(input.ticker).replace(/^\$/, "") || "SHILL"
-  const tokenLine = name ? `${name} ($${ticker})` : `$${ticker}`
   const mintShort = input.mint ? truncateWallet(input.mint, 4, 4) : null
+  const waiting = !input.mint
 
   const links: { label: string; href: string }[] = []
-  if (input.siteUrl) links.push({ label: "Website", href: input.siteUrl })
+  if (input.siteUrl) {
+    const href = waiting ? input.siteUrl.split("#")[0] : input.siteUrl
+    links.push({ label: "Website", href })
+  }
   if (input.telegramUrl) links.push({ label: "Telegram", href: input.telegramUrl })
   if (input.xUrl) links.push({ label: "X", href: input.xUrl })
-  if (input.pumpUrl) links.push({ label: "Pump.fun", href: input.pumpUrl })
-  if (input.mint) {
-    links.push({
-      label: "Solscan",
-      href: explorerAddressUrl(input.mint),
-    })
+  if (!waiting) {
+    if (input.pumpUrl) links.push({ label: "Pump.fun", href: input.pumpUrl })
+    if (input.mint) {
+      links.push({
+        label: "Solscan",
+        href: explorerAddressUrl(input.mint),
+      })
+    }
   }
+
+  const bodyText = waiting
+    ? WAITING_FOR_SHILL
+    : [
+        "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
+        "",
+        `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
+      ].join("\n")
 
   const text = [
     "SHILL",
-    "Get some money where your mouth is.",
+    "Speak up and take your money",
     "",
     DIVIDER,
     "",
-    `Token: ${tokenLine}`,
-    mintShort ? `Mint: ${mintShort}` : "Mint: not set yet",
+    bodyText,
     "",
     DIVIDER,
     "",
-    "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
-    "",
-    `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
-    "",
-    DIVIDER,
-    "",
+    ...(waiting ? [] : [mintShort ? `Mint: ${mintShort}` : "Mint: not set yet", ""]),
     "Links",
     ...(links.length ? links.map((l) => `• ${l.label}: ${l.href}`) : ["• Coming soon"]),
   ].join("\n")
 
   const html = [
     bold("SHILL"),
-    escapeHtml("Get some money where your mouth is."),
+    escapeHtml("Speak up and take your money"),
     "",
     DIVIDER,
     "",
-    `Token: ${bold(tokenLine)}`,
-    mintShort
-      ? `Mint: ${link(mintShort, explorerAddressUrl(input.mint!))}`
-      : "Mint: not set yet",
+    ...(waiting
+      ? [escapeHtml(WAITING_FOR_SHILL)]
+      : [
+          escapeHtml(
+            "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
+          ),
+          "",
+          escapeHtml(
+            `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
+          ),
+        ]),
     "",
     DIVIDER,
     "",
-    escapeHtml(
-      "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
-    ),
-    "",
-    escapeHtml(
-      `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
-    ),
-    "",
-    DIVIDER,
-    "",
+    ...(waiting
+      ? []
+      : [
+          mintShort
+            ? `Mint: ${link(mintShort, explorerAddressUrl(input.mint!))}`
+            : "Mint: not set yet",
+          "",
+        ]),
     bold("Links"),
     ...(links.length
       ? links.map((l) => `• ${link(l.label, l.href)}`)
@@ -197,6 +210,8 @@ export function rouletteSelected(
   explorer?: ExplorerLinks,
 ): FormattedMessage {
   const caller = displayUsername(winner.callerUsername)
+  const via = calloutSourceLabel(winner.source)
+  const callerLine = via ? `${caller} · via ${via}` : caller
   const wallet = walletLine(winner.wallet, explorer)
   const text = [
     "🎰 ROULETTE",
@@ -204,7 +219,7 @@ export function rouletteSelected(
     "🎯 SELECTED",
     "",
     "Caller:",
-    caller,
+    callerLine,
     "",
     "Wallet:",
     wallet.text,
@@ -215,7 +230,7 @@ export function rouletteSelected(
     `🎯 ${bold("SELECTED")}`,
     "",
     "Caller:",
-    escapeHtml(caller),
+    escapeHtml(callerLine),
     "",
     "Wallet:",
     wallet.html,
@@ -234,6 +249,14 @@ export function snapshotRecipients(input: {
   const total = formatAmount(input.allocationAmount * 2, input.distributionToken)
   const lastWallet = walletLine(input.lastCallout.wallet, input.explorer)
   const rouletteWallet = walletLine(input.rouletteWinner.wallet, input.explorer)
+  const lastSource = calloutSourceLabel(input.lastCallout.source)
+  const rouletteSource = calloutSourceLabel(input.rouletteWinner.source)
+  const lastCallerLine = lastSource
+    ? `${displayUsername(input.lastCallout.callerUsername)} · via ${lastSource}`
+    : displayUsername(input.lastCallout.callerUsername)
+  const rouletteCallerLine = rouletteSource
+    ? `${displayUsername(input.rouletteWinner.callerUsername)} · via ${rouletteSource}`
+    : displayUsername(input.rouletteWinner.callerUsername)
 
   const text = [
     "📸 SNAPSHOT COMPLETE",
@@ -243,7 +266,7 @@ export function snapshotRecipients(input: {
     "🥇 LAST CALLOUT",
     "",
     "Caller:",
-    displayUsername(input.lastCallout.callerUsername),
+    lastCallerLine,
     "",
     "Wallet:",
     lastWallet.text,
@@ -256,7 +279,7 @@ export function snapshotRecipients(input: {
     "🎰 ROULETTE WINNER",
     "",
     "Caller:",
-    displayUsername(input.rouletteWinner.callerUsername),
+    rouletteCallerLine,
     "",
     "Wallet:",
     rouletteWallet.text,
@@ -279,7 +302,7 @@ export function snapshotRecipients(input: {
     `🥇 ${bold("LAST CALLOUT")}`,
     "",
     "Caller:",
-    escapeHtml(displayUsername(input.lastCallout.callerUsername)),
+    escapeHtml(lastCallerLine),
     "",
     "Wallet:",
     lastWallet.html,
@@ -292,7 +315,7 @@ export function snapshotRecipients(input: {
     `🎰 ${bold("ROULETTE WINNER")}`,
     "",
     "Caller:",
-    escapeHtml(displayUsername(input.rouletteWinner.callerUsername)),
+    escapeHtml(rouletteCallerLine),
     "",
     "Wallet:",
     rouletteWallet.html,
@@ -539,17 +562,31 @@ export function withBondProgress(
 
 export function qualifiedCaller(input: {
   callouts: Callout[]
+  latest?: Callout
   explorer?: ExplorerLinks
 }): FormattedMessage {
   const list = input.callouts
   const count = list.length
-  const names = list.map((c) => displayUsername(c.callerUsername))
+  const latest = input.latest ?? list[list.length - 1] ?? null
+  const latestName = latest ? displayUsername(latest.callerUsername) : null
+  const latestVia = latest ? calloutSourceLabel(latest.source) : null
+  const latestThesis = latest?.thesis?.trim() || ""
+  const latestWallet = latest ? walletLine(latest.wallet, input.explorer) : null
   const maxShown = 40
-  const shown = names.slice(0, maxShown)
-  const overflow = names.length - shown.length
+  const shown = list.slice(0, maxShown).map((row) => {
+    const name = displayUsername(row.callerUsername)
+    const via = calloutSourceLabel(row.source)
+    return via ? `${name} · ${via}` : name
+  })
+  const overflow = list.length - shown.length
 
   const lines = [
-    "✅ QUALIFIED",
+    "🗣️ QUALIFIED",
+    "",
+    ...(latestName ? [latestName] : []),
+    ...(latestVia ? [`via ${latestVia}`] : []),
+    ...(latestWallet ? [latestWallet.text] : []),
+    ...(latestThesis ? [latestThesis] : []),
     "",
     `Eligible this snapshot: ${count}`,
     "",
@@ -558,15 +595,26 @@ export function qualifiedCaller(input: {
   if (overflow > 0) lines.push(`…and ${overflow} more`)
 
   const htmlLines = [
-    `✅ ${bold("QUALIFIED")}`,
+    `🗣️ ${bold("QUALIFIED")}`,
+    "",
+    ...(latestName ? [escapeHtml(latestName)] : []),
+    ...(latestVia ? [escapeHtml(`via ${latestVia}`)] : []),
+    ...(latestWallet ? [latestWallet.html] : []),
+    ...(latestThesis ? [escapeHtml(latestThesis)] : []),
     "",
     `Eligible this snapshot: ${bold(String(count))}`,
     "",
-    ...shown.map((name) => escapeHtml(name)),
+    ...shown.map((row) => escapeHtml(row)),
   ]
   if (overflow > 0) htmlLines.push(escapeHtml(`…and ${overflow} more`))
 
   return pair(htmlLines.join("\n"), lines.join("\n"), "qualified")
+}
+
+export function snapshotHeading(number: number): { text: string; html: string } {
+  const n = Number.isFinite(number) && number > 0 ? Math.floor(number) : 1
+  const label = `SNAPSHOT #${n}`
+  return { text: `📸 ${label}`, html: `📸 ${bold(label)}` }
 }
 
 /** One lasting payout notice: winners, amounts, and sendout txs. */
@@ -581,6 +629,7 @@ export function snapshotPayout(input: {
   snapshotMaxMs: number
   explorer?: ExplorerLinks
   pendingLabel?: string | null
+  snapshotNumber: number
 }): FormattedMessage {
   const amount = formatAmount(input.allocationAmount, input.distributionToken)
   const total = formatAmount(input.allocationAmount * 2, input.distributionToken)
@@ -609,8 +658,9 @@ export function snapshotPayout(input: {
     ? [escapeHtml(input.pendingLabel)]
     : ["Next snapshot:", `⏳ Randomized between ${escapeHtml(range)}`]
 
+  const heading = snapshotHeading(input.snapshotNumber)
   const text = [
-    "💸 PAYOUT",
+    heading.text,
     "",
     DIVIDER,
     "",
@@ -629,7 +679,7 @@ export function snapshotPayout(input: {
   ].join("\n")
 
   const html = [
-    `💸 ${bold("PAYOUT")}`,
+    heading.html,
     "",
     DIVIDER,
     "",
@@ -659,6 +709,8 @@ function formatWinnerBlock(input: {
   explorer?: ExplorerLinks
 }): { html: string; text: string } {
   const caller = displayUsername(input.callout.callerUsername)
+  const via = calloutSourceLabel(input.callout.source)
+  const callerLine = via ? `${caller} · via ${via}` : caller
   const wallet = walletLine(input.callout.wallet, input.explorer)
   const tx = input.tx
 
@@ -666,13 +718,13 @@ function formatWinnerBlock(input: {
     return {
       text: [
         input.title,
-        caller,
+        callerLine,
         `→ ${wallet.text}`,
         `${input.amount} · pending`,
       ].join("\n"),
       html: [
         input.titleHtml,
-        escapeHtml(caller),
+        escapeHtml(callerLine),
         `→ ${wallet.html}`,
         `${escapeHtml(input.amount)} · pending`,
       ].join("\n"),
@@ -683,14 +735,14 @@ function formatWinnerBlock(input: {
     return {
       text: [
         input.title,
-        caller,
+        callerLine,
         `→ ${wallet.text}`,
         `${input.amount} · failed`,
         tx.error ?? "Treasury send failed.",
       ].join("\n"),
       html: [
         input.titleHtml,
-        escapeHtml(caller),
+        escapeHtml(callerLine),
         `→ ${wallet.html}`,
         `${escapeHtml(input.amount)} · failed`,
         escapeHtml(tx.error ?? "Treasury send failed."),
@@ -702,13 +754,13 @@ function formatWinnerBlock(input: {
     return {
       text: [
         input.title,
-        caller,
+        callerLine,
         `→ ${wallet.text}`,
         `${input.amount} · sending…`,
       ].join("\n"),
       html: [
         input.titleHtml,
-        escapeHtml(caller),
+        escapeHtml(callerLine),
         `→ ${wallet.html}`,
         `${escapeHtml(input.amount)} · sending…`,
       ].join("\n"),
@@ -719,7 +771,7 @@ function formatWinnerBlock(input: {
   return {
     text: [
       input.title,
-      caller,
+      callerLine,
       `→ ${wallet.text}`,
       `${input.amount} sent`,
       "TX:",
@@ -727,7 +779,7 @@ function formatWinnerBlock(input: {
     ].join("\n"),
     html: [
       input.titleHtml,
-      escapeHtml(caller),
+      escapeHtml(callerLine),
       `→ ${wallet.html}`,
       `${escapeHtml(input.amount)} sent`,
       "TX:",
@@ -771,6 +823,7 @@ export function migrationDetected(input: {
   holderCount?: number
   bonusAmount: number
   distributionToken: string
+  winnerCount: number
 }): FormattedMessage {
   const amount = formatAmount(input.bonusAmount, input.distributionToken)
   const holders =
@@ -783,9 +836,10 @@ export function migrationDetected(input: {
     "Pump.fun curve complete.",
     holders,
     "",
-    `Bonus: ${amount}`,
+    `Remaining supply: ${amount}`,
+    `Lottery: ${input.winnerCount} winners`,
     "",
-    "Selecting winner...",
+    "Selecting winners...",
   ].join("\n")
   const html = [
     `🚀 ${bold("BONDED")}`,
@@ -793,95 +847,72 @@ export function migrationDetected(input: {
     "Pump.fun curve complete.",
     escapeHtml(holders),
     "",
-    `Bonus: ${bold(amount)}`,
+    `Remaining supply: ${bold(amount)}`,
+    `Lottery: ${bold(String(input.winnerCount))} winners`,
     "",
-    "Selecting winner...",
+    "Selecting winners...",
   ].join("\n")
   return pair(html, text, "migration")
 }
 
 export function migrationSkipped(reason: string): FormattedMessage {
-  const text = ["🚀 BONDING BONUS", "", "Skipped", "", reason].join("\n")
-  const html = [`🚀 ${bold("BONDING BONUS")}`, "", bold("Skipped"), "", escapeHtml(reason)].join("\n")
+  const text = ["🚀 BONDING LOTTERY", "", "Skipped", "", reason].join("\n")
+  const html = [`🚀 ${bold("BONDING LOTTERY")}`, "", bold("Skipped"), "", escapeHtml(reason)].join("\n")
   return pair(html, text, "migration")
 }
 
 export function migrationWinner(input: {
-  callerUsername: string
-  wallet: string
-  calloutCount: number
-  amount: number
+  winners: Array<{
+    callerUsername: string
+    wallet: string
+    calloutCount: number
+    amount: number
+  }>
   distributionToken: string
   explorer?: ExplorerLinks
 }): FormattedMessage {
-  const caller = displayUsername(input.callerUsername)
-  const amount = formatAmount(input.amount, input.distributionToken)
-  const wallet = walletLine(input.wallet, input.explorer)
-  const text = [
-    "🎯 BONDING BONUS",
-    "",
-    "SELECTED",
-    "",
-    caller,
-    "",
-    "Wallet:",
-    wallet.text,
-    "",
-    `${input.calloutCount} accepted callouts`,
-    "",
-    "Allocation:",
-    amount,
-  ].join("\n")
+  const lines = input.winners.map((row, i) => {
+    const caller = displayUsername(row.callerUsername)
+    const amount = formatAmount(row.amount, input.distributionToken)
+    const wallet = walletLine(row.wallet, input.explorer)
+    return {
+      text: `${i + 1}. ${caller} · ${amount}\n   ${wallet.text} · ${row.calloutCount} callouts`,
+      html: `${i + 1}. ${escapeHtml(caller)} · ${bold(amount)}<br/>   ${wallet.html} · ${row.calloutCount} callouts`,
+    }
+  })
+  const text = ["🎯 BONDING LOTTERY", "", "SELECTED", "", ...lines.map((l) => l.text)].join("\n\n")
   const html = [
-    `🎯 ${bold("BONDING BONUS")}`,
+    `🎯 ${bold("BONDING LOTTERY")}`,
     "",
     bold("SELECTED"),
     "",
-    escapeHtml(caller),
-    "",
-    "Wallet:",
-    wallet.html,
-    "",
-    `${input.calloutCount} accepted callouts`,
-    "",
-    "Allocation:",
-    bold(amount),
+    ...lines.map((l) => l.html),
   ].join("\n")
   return pair(html, text, "migration")
 }
 
 export function migrationFinal(input: {
-  callerUsername: string
-  wallet: string
-  tx: DistributionTx
-  amount: number
+  winners: Array<{
+    callerUsername: string
+    wallet: string
+    amount: number
+    tx: DistributionTx
+  }>
   distributionToken: string
   explorer?: ExplorerLinks
 }): FormattedMessage {
-  const caller = displayUsername(input.callerUsername)
-  const amount = formatAmount(input.amount, input.distributionToken)
-  const wallet = walletLine(input.wallet, input.explorer)
-  const confirmed = formatConfirmedBlock(input.tx, input.explorer)
-  const text = [
-    "✅ BONDING BONUS SENT",
-    "",
-    caller,
-    `→ ${wallet.text}`,
-    "",
-    `${amount} sent`,
-    "",
-    confirmed.text,
-  ].join("\n")
-  const html = [
-    `✅ ${bold("BONDING BONUS SENT")}`,
-    "",
-    escapeHtml(caller),
-    `→ ${wallet.html}`,
-    "",
-    `${escapeHtml(amount)} sent`,
-    "",
-    confirmed.html,
-  ].join("\n")
+  const lines = input.winners.map((row, i) => {
+    const caller = displayUsername(row.callerUsername)
+    const amount = formatAmount(row.amount, input.distributionToken)
+    const wallet = walletLine(row.wallet, input.explorer)
+    const confirmed = formatConfirmedBlock(row.tx, input.explorer)
+    return {
+      text: `${i + 1}. ${caller} → ${wallet.text}\n   ${amount}\n   ${confirmed.text}`,
+      html: `${i + 1}. ${escapeHtml(caller)} → ${wallet.html}<br/>   ${escapeHtml(amount)}<br/>   ${confirmed.html}`,
+    }
+  })
+  const text = ["✅ BONDING LOTTERY SENT", "", ...lines.map((l) => l.text)].join("\n\n")
+  const html = [`✅ ${bold("BONDING LOTTERY SENT")}`, "", ...lines.map((l) => l.html)].join("\n")
   return pair(html, text, "final")
 }
 

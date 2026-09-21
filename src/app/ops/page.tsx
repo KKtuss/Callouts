@@ -1,6 +1,6 @@
 import { cookies, headers } from "next/headers"
 import { OpsApp } from "@/components/ops-app"
-import { getRuntime } from "@/engine/runtime"
+import { waitForRuntime } from "@/engine/runtime"
 
 export const dynamic = "force-dynamic"
 
@@ -37,6 +37,6 @@ export default async function OpsPage() {
     )
   }
 
-  const { store } = getRuntime()
+  const { store } = await waitForRuntime()
   return <OpsApp initialState={store.clientState()} />
 }

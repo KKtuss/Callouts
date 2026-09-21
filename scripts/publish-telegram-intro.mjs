@@ -39,15 +39,12 @@ async function apiJson(method, body) {
   return response.json()
 }
 
-const ticker = (env.CALLOUT_TOKEN || env.DISTRIBUTION_TOKEN || "SHILL").replace(/^\$/, "")
-const name = env.CALLOUT_NAME?.trim() || null
 const mint = env.CALLOUT_MINT?.trim() || null
 const siteUrl = env.NEXT_PUBLIC_SITE_URL?.trim() || "https://callout-beta.vercel.app"
 const telegramUrl = env.NEXT_PUBLIC_TELEGRAM_URL?.trim() || null
 const xUrl = env.NEXT_PUBLIC_X_URL?.trim() || null
 const windowLabel = "5–15 minutes"
 
-const tokenLine = name ? `${name} ($${ticker})` : `$${ticker}`
 const mintShort = mint ? `${mint.slice(0, 4)}…${mint.slice(-4)}` : null
 
 const links = []
@@ -58,28 +55,39 @@ if (mint) links.push(`• <a href="https://pump.fun/coin/${mint}">Pump.fun</a>`)
 if (mint) links.push(`• <a href="https://solscan.io/account/${mint}">Solscan</a>`)
 if (links.length === 0) links.push("• Coming soon")
 
-const caption = [
-  "<b>SHILL</b>",
-  "Get some money where your mouth is.",
-  "",
-  "────────────────",
-  "",
-  `Token: <b>${tokenLine.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</b>`,
-  mintShort
-    ? `Mint: <a href="https://solscan.io/account/${mint}">${mintShort}</a>`
-    : "Mint: not set yet",
-  "",
-  "────────────────",
-  "",
-  "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
-  "",
-  `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${windowLabel}.`,
-  "",
-  "────────────────",
-  "",
-  "<b>Links</b>",
-  ...links,
-].join("\n")
+const caption = mint
+  ? [
+      "<b>SHILL</b>",
+      "Speak up and take your money",
+      "",
+      "────────────────",
+      "",
+      "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
+      "",
+      `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${windowLabel}.`,
+      "",
+      "────────────────",
+      "",
+      mintShort
+        ? `Mint: <a href="https://solscan.io/account/${mint}">${mintShort}</a>`
+        : "Mint: not set yet",
+      "",
+      "<b>Links</b>",
+      ...links,
+    ].join("\n")
+  : [
+      "<b>SHILL</b>",
+      "Speak up and take your money",
+      "",
+      "────────────────",
+      "",
+      "Waiting for SHILL tech to be live...",
+      "",
+      "────────────────",
+      "",
+      "<b>Links</b>",
+      ...links,
+    ].join("\n")
 
 const chat = await apiJson("getChat", { chat_id: chatId })
 const pinnedId = chat.result?.pinned_message?.message_id

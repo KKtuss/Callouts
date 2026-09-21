@@ -71,13 +71,49 @@ describe("public Telegram surface", () => {
       distributionToken: "BONK",
       snapshotMinMs: 5 * 60_000,
       snapshotMaxMs: 15 * 60_000,
+      snapshotNumber: 1,
     })
-    expect(final.text).toContain("PAYOUT")
+    expect(final.text).toContain("SNAPSHOT #1")
+    expect(final.text).not.toContain("PAYOUT")
     expect(final.text).toContain("@username")
     expect(final.text).toContain("@alpha")
     expect(final.text).toContain("Next snapshot")
     expect(final.html).toContain("href=")
     expect(final.text).not.toMatch(/\/status|\/balance|\/config/)
+
+    const twelfth = snapshotPayout({
+      lastCallout: callout,
+      rouletteWinner: { ...callout, id: "a", callerUsername: "@alpha" },
+      lastTx: tx,
+      rouletteTx: { ...tx, kind: "last_callout" },
+      allocationAmount: 100,
+      distributionToken: "BONK",
+      snapshotMinMs: 5 * 60_000,
+      snapshotMaxMs: 15 * 60_000,
+      snapshotNumber: 12,
+    })
+    expect(twelfth.text).toContain("SNAPSHOT #12")
+  })
+
+  it("labels FOMO and Pump.fun callout sources on payout copy", () => {
+    const fomo = { ...callout, source: "fomo" }
+    const pump = { ...callout, id: "p", callerUsername: "@pumpuser", source: "pump-fun" }
+    const selected = rouletteSelected(fomo)
+    expect(selected.text).toContain("@username · via FOMO")
+
+    const final = snapshotPayout({
+      lastCallout: fomo,
+      rouletteWinner: pump,
+      lastTx: tx,
+      rouletteTx: { ...tx, kind: "last_callout", callerUsername: "@pumpuser" },
+      allocationAmount: 100,
+      distributionToken: "BONK",
+      snapshotMinMs: 5 * 60_000,
+      snapshotMaxMs: 15 * 60_000,
+      snapshotNumber: 1,
+    })
+    expect(final.text).toContain("@username · via FOMO")
+    expect(final.text).toContain("@pumpuser · via Pump.fun")
   })
 
   it("formats the permanent channel intro without control affordances", () => {
@@ -93,22 +129,76 @@ describe("public Telegram surface", () => {
     })
     expect(intro.kind).toBe("intro")
     expect(intro.text).toContain("SHILL")
-    expect(intro.text).toContain("The Day Trader ($AIDEN)")
-    expect(intro.text).toContain("Get some money where your mouth is.")
+    expect(intro.text).toContain("Speak up and take your money")
+    expect(intro.text).not.toContain("Token:")
     expect(intro.text).toContain("Website")
     expect(intro.html).toContain("href=")
+    expect(intro.text.indexOf("Mint:")).toBeGreaterThan(
+      intro.text.indexOf("In a world where nothing matters"),
+    )
+    expect(intro.text.indexOf("Links")).toBeGreaterThan(intro.text.indexOf("Mint:"))
     expect(intro.text).not.toMatch(/\/pause|\/admin/)
+    const fatSite = `https://callout-beta.vercel.app#qid=801&qfp=${"ab".repeat(8)}&qn=1&c=${"x".repeat(1400)}`
+    const fat = channelIntro({
+      tokenName: "Test",
+      ticker: "TEST",
+      mint: "BKfdpRHgMUnZiLzBQjts6XimqrRedZVvxEjFttsHpump",
+      windowLabel: "5–15 minutes",
+      siteUrl: fatSite,
+      telegramUrl: "https://t.me/example",
+      pumpUrl: "https://pump.fun/coin/BKfdpRHgMUnZiLzBQjts6XimqrRedZVvxEjFttsHpump",
+    })
+    expect(fat.html.length).toBeGreaterThan(1024)
+
+    const waiting = channelIntro({
+      tokenName: null,
+      ticker: "SHILL",
+      mint: null,
+      windowLabel: "5–15 minutes",
+      siteUrl: "https://callout-beta.vercel.app#qid=801&snap=2026-09-20T12:00:00.000Z",
+      telegramUrl: "https://t.me/example",
+      pumpUrl: "https://pump.fun/coin/BKfdpRHgMUnZiLzBQjts6XimqrRedZVvxEjFttsHpump",
+    })
+    expect(waiting.text).toContain("Waiting for SHILL tech to be live...")
+    expect(waiting.text).not.toContain("Mint:")
+    expect(waiting.text).not.toContain("pump.fun/coin/")
+    expect(waiting.text).not.toContain("BKfdp")
+    expect(waiting.text).not.toContain("qid=")
+    expect(waiting.html).toContain("https://callout-beta.vercel.app")
+    expect(waiting.html).not.toContain("qid=801")
+  })
+
+  it("names the callout platform on the qualified board", () => {
+    const fomo = { ...callout, source: "fomo", callerUsername: "@beta", thesis: "chart looks ready" }
+    const pump = { ...callout, id: "p", source: "pump-fun" }
+    const qualified = qualifiedCaller({ callouts: [pump, fomo], latest: fomo })
+    expect(qualified.text).toContain("@beta")
+    expect(qualified.text).toContain("via FOMO")
+    expect(qualified.text.indexOf("via FOMO")).toBeGreaterThan(qualified.text.indexOf("@beta"))
+    expect(qualified.text).toContain("@username · Pump.fun")
+    expect(qualified.text).toContain("@beta · FOMO")
   })
 
   it("formats qualified-caller and bond-progress notices", () => {
     const qualified = qualifiedCaller({
-      callouts: [callout, { ...callout, id: "e", callerUsername: "@beta" }],
+      callouts: [callout, { ...callout, id: "e", callerUsername: "@beta", thesis: "chart looks ready" }],
+      latest: { ...callout, id: "e", callerUsername: "@beta", thesis: "chart looks ready" },
     })
     expect(qualified.kind).toBe("qualified")
+    expect(qualified.text).toContain("🗣️")
     expect(qualified.text).toContain("QUALIFIED")
-    expect(qualified.text).toContain("@username")
     expect(qualified.text).toContain("@beta")
+    expect(qualified.text).toContain("chart looks ready")
+    expect(qualified.text).toContain("@username")
+    expect(qualified.text).toContain("`7xK...AsU`")
+    expect(qualified.text.indexOf("`7xK...AsU`")).toBeGreaterThan(qualified.text.indexOf("@beta"))
+    expect(qualified.text.indexOf("chart looks ready")).toBeGreaterThan(
+      qualified.text.indexOf("`7xK...AsU`"),
+    )
+    expect(qualified.text.split("`7xK...AsU`")).toHaveLength(2)
+    expect(qualified.html).toContain("solscan.io/account/")
     expect(qualified.text).toContain("Eligible this snapshot: 2")
+    expect(qualified.text).not.toContain("✅")
     expect(qualified.text).not.toContain("$BONK")
     expect(qualified.text).not.toMatch(/\/pause|\/admin/)
 

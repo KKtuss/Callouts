@@ -8,7 +8,8 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useEngineState } from "@/hooks/use-engine-state"
-import type { Callout, ClientState, DistributionTx, MigrationAudit, SnapshotAudit } from "@/engine/types"
+import { isCalloutInCurrentWindow } from "@/lib/snapshot-window"
+import type { Callout, ClientState, DistributionTx, EngineLog, MigrationAudit, SnapshotAudit } from "@/engine/types"
 import { getClockSnapshot, getServerClockSnapshot, subscribeClock } from "@/lib/clock"
 import { explorerAddressUrl } from "@/lib/explorer"
 import {
@@ -38,10 +39,6 @@ async function post(path: string, body?: unknown) {
   })
   const payload = (await response.json()) as { error?: string }
   if (!response.ok) throw new Error(payload.error ?? "Request failed")
-}
-
-function windowStartIso(state: ClientState): string {
-  return state.status.lastSnapshotAt ?? state.status.startedAt
 }
 
 function ingestStatusLabel(state: ClientState): string {
@@ -133,9 +130,10 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
     )
   }
 
-  const startIso = windowStartIso(state)
   const live = [...state.callouts].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))
-  const windowed = live.filter((callout) => callout.capturedAt >= startIso)
+  const windowed = live.filter((callout) =>
+    isCalloutInCurrentWindow(callout.capturedAt, state.status.lastSnapshotAt, state.status.startedAt),
+  )
   const token = displayToken(state.status.config.distributionToken)
   const selectedAudit =
     state.audits.find((audit) => audit.id === selectedAuditId) ?? state.audits[0] ?? null
@@ -248,7 +246,11 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
                     <CalloutRow
                       key={callout.id}
                       callout={callout}
-                      inWindow={callout.capturedAt >= startIso}
+                      inWindow={isCalloutInCurrentWindow(
+                        callout.capturedAt,
+                        state.status.lastSnapshotAt,
+                        state.status.startedAt,
+                      )}
                     />
                   ))}
                 </ul>
@@ -315,6 +317,8 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
                 )}
               </section>
             </div>
+
+            <WalletConsole logs={state.logs ?? []} />
           </div>
         </TabsContent>
 
@@ -340,7 +344,7 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
                   const axiomCookie = axiomCookieDraft.trim()
                   void run("settings", async () => {
                     await post("/api/admin/config", {
-                      ...(mint && mint !== currentMint ? { coinMint: mint } : {}),
+                      ...(mint !== currentMint ? { coinMint: mint || null } : {}),
                       allocationAmount: Number.isFinite(amount) ? amount : undefined,
                       migrationBonusAmount: Number.isFinite(migrationBonus) ? migrationBonus : undefined,
                       snapshotMinMs: Number.isFinite(minMinutes)
@@ -499,8 +503,11 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
                     spellCheck={false}
                   />
                   <p className="text-[11px] text-white/35">
-                    Stored in server memory only — never shown again. Public treasury address updates from
-                    this keypair. Sends stay mocked until on-chain payout is wired.
+                    Stored in server memory and process env for this instance. On Vercel, also set{" "}
+                    <span className="font-mono">TREASURY_PRIVATE_KEY</span> +{" "}
+                    <span className="font-mono">CALLOUT_MINT</span> in project env or cold starts wipe
+                    them. With the key loaded, snapshot payouts and creator-fee collects are live
+                    on-chain.
                   </p>
                 </div>
 
@@ -524,6 +531,42 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
         </TabsContent>
       </Tabs>
     </div>
+  )
+}
+
+function WalletConsole({ logs }: { logs: EngineLog[] }) {
+  return (
+    <section className="mt-6 flex max-h-72 min-h-[12rem] flex-col rounded-2xl border border-emerald-500/20 bg-black/40">
+      <div className="flex items-baseline justify-between gap-3 border-b border-white/5 px-4 py-3">
+        <h2 className="text-sm font-medium text-emerald-200/90">Wallet / snapshot console</h2>
+        <p className="text-xs text-white/40">{logs.length} lines · live</p>
+      </div>
+      {logs.length === 0 ? (
+        <p className="px-4 py-8 font-mono text-xs text-white/35">
+          Waiting for snapshot activity… Creator-fee collect and treasury sends will appear here.
+        </p>
+      ) : (
+        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 py-3 font-mono text-[11px] leading-relaxed">
+          {logs.map((line) => (
+            <li
+              key={`${line.at}:${line.level}:${line.message}`}
+              className={
+                line.level === "error"
+                  ? "text-red-300/90"
+                  : line.level === "warn"
+                    ? "text-amber-200/85"
+                    : line.message.includes("[wallet]")
+                      ? "text-emerald-100/85"
+                      : "text-white/55"
+              }
+            >
+              <span className="text-white/30">{formatClockIso(line.at)} </span>
+              {line.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 
@@ -553,8 +596,8 @@ function MigrationPanel({
         <p className="text-xs text-white/45">{statusLabel}</p>
       </div>
       <p className="mt-1 text-xs text-white/45">
-        On migration, {formatInteger(bonusAmount)} {token} goes to one random holder with ≥{minCallouts}{" "}
-        accepted callouts since monitoring started.
+        On bond, remaining treasury supply is split evenly across {formatInteger(5)} eligible holders
+        (min {minCallouts} callouts). After that, snapshots claim creator fees and pay SOL.
       </p>
       {migration.progressPercent != null ? (
         <div className="mt-3 grid gap-1.5">
@@ -587,6 +630,18 @@ function MigrationPanel({
           </div>
           {latest.skipReason ? (
             <p className="mt-2 text-sm text-amber-100/90">{latest.skipReason}</p>
+          ) : latest.winners?.length ? (
+            <ul className="mt-2 grid gap-2">
+              {latest.winners.map((row) => (
+                <li key={row.wallet} className="rounded-lg border border-white/10 px-3 py-2">
+                  <p className="text-sm font-medium text-white">{row.callerUsername}</p>
+                  <p className="text-xs text-white/55">
+                    {row.calloutCount} callouts · {formatInteger(row.amount)} {token}
+                  </p>
+                  <p className="break-all font-mono text-[11px] text-white/40">{row.wallet}</p>
+                </li>
+              ))}
+            </ul>
           ) : latest.winner ? (
             <div className="mt-2 grid gap-1">
               <p className="text-sm font-medium text-white">{latest.winner.callerUsername}</p>

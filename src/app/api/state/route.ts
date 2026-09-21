@@ -1,8 +1,10 @@
-import { getRuntime } from "@/engine/runtime"
+import { waitForRuntime } from "@/engine/runtime"
 
 export const dynamic = "force-dynamic"
 
 export async function GET() {
-  const { store } = getRuntime()
-  return Response.json(store.clientState())
+  const { store } = await waitForRuntime()
+  return Response.json(store.clientState(), {
+    headers: { "Cache-Control": "no-store" },
+  })
 }

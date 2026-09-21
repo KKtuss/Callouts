@@ -1,5 +1,5 @@
 import { requireAdmin } from "@/lib/admin-auth"
-import { getRuntime, setAxiomCookie, setWatchMint } from "@/engine/runtime"
+import { clearWatchMint, getRuntime, setAxiomCookie, setWatchMint } from "@/engine/runtime"
 import type { EngineConfig } from "@/engine/types"
 
 export const dynamic = "force-dynamic"
@@ -17,8 +17,10 @@ export async function POST(request: Request) {
 
   const body = (await request.json()) as ConfigBody
   try {
-    if (typeof body.coinMint === "string" && body.coinMint.trim()) {
-      await setWatchMint(body.coinMint)
+    if (Object.prototype.hasOwnProperty.call(body, "coinMint")) {
+      const raw = typeof body.coinMint === "string" ? body.coinMint.trim() : ""
+      if (raw) await setWatchMint(raw)
+      else await clearWatchMint()
     }
 
     if (Object.prototype.hasOwnProperty.call(body, "treasuryPrivateKey")) {

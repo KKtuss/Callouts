@@ -7,6 +7,7 @@ import {
   formatSupplyPercent,
   truncateWallet,
 } from "@/lib/format"
+import { isCalloutInCurrentWindow } from "@/lib/snapshot-window"
 import { sumRewards, type RewardTotals } from "@/lib/rewards"
 import type {
   Callout,
@@ -26,7 +27,7 @@ export type PublicCallout = {
   walletUrl: string
   token: string
   capturedAt: string
-  source: "pump.fun" | "axiom" | "other"
+  source: "pump.fun" | "fomo" | "axiom" | "other"
   thesis?: string
 }
 
@@ -158,6 +159,7 @@ export type PublicView = {
 
 function mapSource(source: string): PublicCallout["source"] {
   const s = source.toLowerCase()
+  if (s.includes("fomo")) return "fomo"
   if (s.includes("pump")) return "pump.fun"
   if (s.includes("axiom")) return "axiom"
   return "other"
@@ -269,7 +271,6 @@ function publicEnv(name: string): string | null {
 export function toPublicView(state: ClientState): PublicView {
   const cfg = state.status.config
   const addressTemplate = cfg.explorerAddressTemplate
-  const windowStart = state.status.lastSnapshotAt ?? state.status.startedAt
   const ticker = displayToken(cfg.distributionToken).replace(/^\$/, "")
 
   const chronological = [...state.audits].sort(
@@ -284,7 +285,9 @@ export function toPublicView(state: ClientState): PublicView {
   )
 
   const windowCallouts = state.callouts
-    .filter((c) => c.capturedAt >= windowStart)
+    .filter((c) =>
+      isCalloutInCurrentWindow(c.capturedAt, state.status.lastSnapshotAt, state.status.startedAt),
+    )
     .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt))
     .map((c) => mapCallout(c, addressTemplate))
 

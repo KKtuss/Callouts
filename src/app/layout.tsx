@@ -10,12 +10,12 @@ const jakarta = Plus_Jakarta_Sans({
 })
 
 export const metadata: Metadata = {
-  title: "SHILL — Get some money where your mouth is",
+  title: "SHILL — Speak up and take your money",
   description:
-    "In a world where nothing matters more than being heard — SHILL turns callouts into live payout rounds.",
+    "Speak up and take your money. SHILL turns callouts into live payout rounds.",
   openGraph: {
     title: "SHILL",
-    description: "Call it. Get noticed. Get paid.",
+    description: "Speak up and take your money",
     images: [{ url: "/brand/logo.png?v=3", width: 1200, height: 1200 }],
   },
   icons: {

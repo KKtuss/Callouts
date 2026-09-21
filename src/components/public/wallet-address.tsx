@@ -9,16 +9,21 @@ export function WalletAddress({
   short,
   href,
   className,
+  wrap = false,
 }: {
   address: string
   short?: string
   href?: string | null
   className?: string
+  wrap?: boolean
 }) {
   const [copied, setCopied] = useState(false)
   if (!address) return <span className="text-muted-foreground">—</span>
 
   const label = short || address
+  const labelClass = wrap
+    ? "break-all font-medium tracking-wide text-shill-deep transition hover:text-primary"
+    : "truncate font-medium tracking-wide text-shill-deep transition hover:text-primary"
 
   async function copy() {
     try {
@@ -38,12 +43,12 @@ export function WalletAddress({
           target="_blank"
           rel="noreferrer"
           title={address}
-          className="truncate font-medium tracking-wide text-shill-deep transition hover:text-primary"
+          className={labelClass}
         >
           {label}
         </a>
       ) : (
-        <span title={address} className="truncate font-medium tracking-wide">
+        <span title={address} className={wrap ? "break-all font-medium tracking-wide" : "truncate font-medium tracking-wide"}>
           {label}
         </span>
       )}

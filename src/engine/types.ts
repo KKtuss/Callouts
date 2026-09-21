@@ -126,11 +126,18 @@ export type EngineConfig = {
   explorerAddressTemplate: string
   treasuryPublicAddress: string
   calloutSources: string[]
-  /** Tokens sent on bonding/migration (default 10M = 1% of 1B Pump supply). */
+  /**
+   * Legacy fixed bonus size. Bond lottery now splits the remaining treasury
+   * token balance; this is only used as a mock/fallback floor when balance is unset.
+   */
   migrationBonusAmount: number
+  /** Winners in the one-time bond lottery (remaining supply split evenly). */
+  migrationWinnerCount: number
   /** Minimum accepted callouts since mint watch started. */
   migrationMinCallouts: number
   migrationPollMs: number
+  /** Share of claimed creator fees paid out each post-bond snapshot (basis points). */
+  creatorRewardShareBps: number
 }
 
 export type MigrationAudit = {
@@ -142,14 +149,23 @@ export type MigrationAudit = {
   minCallouts: number
   eligibleCount: number
   holderCount: number
+  /** First winner — kept for older ops UI. */
   winner: {
     wallet: string
     callerUsername: string
     calloutCount: number
   } | null
+  winners: Array<{
+    wallet: string
+    callerUsername: string
+    calloutCount: number
+    amount: number
+  }>
   selectionEntropyHex: string
+  /** Total tokens sent across all bond lottery winners. */
   amount: number
   transaction: DistributionTx | null
+  transactions: DistributionTx[]
   confirmationStatus: "in_progress" | "confirmed" | "partial_failure" | "skipped"
   skipReason: string | null
   telegramMessageIds: {
@@ -207,6 +223,17 @@ export type EngineStatus = {
     skipped: number
     cookieConfigured: boolean
   }
+  fomoIngest: {
+    enabled: boolean
+    connected: boolean
+    lastPollAt: string | null
+    lastError: string | null
+    lastFeedCount: number
+    accepted: number
+    skipped: number
+    unresolved: number
+    apiKeyConfigured: boolean
+  }
   config: EngineConfig
 }
 
@@ -216,6 +243,15 @@ export type ClientState = {
   callouts: Callout[]
   audits: SnapshotAudit[]
   migrations: MigrationAudit[]
+  /** Recent engine/wallet console lines for /ops. */
+  logs: EngineLog[]
+}
+
+export type EngineLog = {
+  id: string
+  at: string
+  level: "info" | "warn" | "error"
+  message: string
 }
 
 export type EngineEvent =

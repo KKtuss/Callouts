@@ -95,15 +95,20 @@ export class CalloutCollector {
 
   /**
    * One callout per username or wallet in the current snapshot window.
-   * The first accepted callout wins; later ones from the same identity are dropped.
+   * Live ingest can replace the row when Pump/Axiom sends a new activity id.
    */
   ingestUnique(
     input: Parameters<typeof normalizeCallout>[0],
     windowStart: Date,
+    options?: { replace?: boolean },
   ): { callout: Callout; duplicate: boolean } {
     const callout = normalizeCallout(input)
     const existing = this.findDuplicate(callout, windowStart)
-    if (existing) return { callout: existing, duplicate: true }
+    if (existing) {
+      const canReplace = Boolean(options?.replace && callout.id && existing.id !== callout.id)
+      if (!canReplace) return { callout: existing, duplicate: true }
+      this.callouts = this.callouts.filter((row) => row !== existing)
+    }
     this.callouts.push(callout)
     if (this.callouts.length > 5_000) {
       this.callouts = this.callouts.slice(-4_000)
@@ -140,6 +145,28 @@ export class CalloutCollector {
 
   all(): Callout[] {
     return [...this.callouts]
+  }
+
+  merge(rows: Callout[], windowStart: Date) {
+    for (const row of rows) {
+      this.ingestUnique(
+        {
+          token: row.token,
+          callerUsername: row.callerUsername,
+          wallet: row.wallet,
+          source: row.source,
+          capturedAt: row.capturedAt,
+          id: row.id,
+          thesis: row.thesis,
+        },
+        windowStart,
+      )
+    }
+  }
+
+  /** Drop settled-window rows after a snapshot clock is restored on a new isolate. */
+  dropAtOrBefore(iso: string) {
+    this.callouts = this.callouts.filter((callout) => callout.capturedAt > iso)
   }
 
   clear() {

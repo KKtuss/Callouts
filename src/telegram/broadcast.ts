@@ -17,6 +17,12 @@ export type ChannelIntroPayload = {
   bannerPath?: string
 }
 
+export type EnsureIntroOptions = {
+  createIfMissing?: boolean
+  /** Edit the existing pin even when the payload has no mint (idle / waiting). */
+  allowClearMint?: boolean
+}
+
 export interface Broadcast {
   send(message: FormattedMessage): Promise<ChannelMessage>
   edit(id: string, message: FormattedMessage): Promise<ChannelMessage>
@@ -24,7 +30,11 @@ export interface Broadcast {
   /** Drop tracked messages. Optionally also delete recent Telegram channel posts. */
   clear(options?: { purgeTelegram?: number }): Promise<void>
   /** Permanent pinned intro (banner + hero). Survives mint resets / purges. */
-  ensureIntro(payload: ChannelIntroPayload, message: FormattedMessage): Promise<ChannelMessage | null>
+  ensureIntro(
+    payload: ChannelIntroPayload,
+    message: FormattedMessage,
+    options?: EnsureIntroOptions,
+  ): Promise<ChannelMessage | null>
   disablePublicCommands(): Promise<void>
   getMessages(): ChannelMessage[]
 }
@@ -91,8 +101,13 @@ export class PreviewBroadcast implements Broadcast {
 
   async delete(id: string): Promise<void> {
     if (id === this.introId) return
+    const numeric = Number(id)
     const before = this.messages.length
-    this.messages = this.messages.filter((item) => item.id !== id)
+    this.messages = this.messages.filter((item) => {
+      if (item.id === id) return false
+      if (Number.isFinite(numeric) && item.telegramMessageId === numeric) return false
+      return true
+    })
     if (this.messages.length !== before) this.emit()
   }
 
@@ -105,9 +120,13 @@ export class PreviewBroadcast implements Broadcast {
   }
 
   async ensureIntro(
-    _payload: ChannelIntroPayload,
+    payload: ChannelIntroPayload,
     message: FormattedMessage,
+    options?: EnsureIntroOptions,
   ): Promise<ChannelMessage | null> {
+    if (!payload.mint && this.introId && !options?.allowClearMint) {
+      return this.messages.find((item) => item.id === this.introId) ?? null
+    }
     if (this.introId) {
       try {
         return await this.edit(this.introId, message)
@@ -118,8 +137,10 @@ export class PreviewBroadcast implements Broadcast {
     const existing = this.messages.find((item) => item.kind === "intro")
     if (existing) {
       this.introId = existing.id
+      if (!payload.mint) return existing
       return this.edit(existing.id, message)
     }
+    if (options?.createIfMissing === false) return existing ?? null
     const sent = await this.send(message)
     this.introId = sent.id
     return sent
@@ -143,14 +164,12 @@ export class TelegramBroadcast implements Broadcast {
   private local = new Map<string, ChannelMessage>()
   /** Telegram message ids that must never be purged (pinned intro). */
   private protectedIds = new Set<number>()
+  private pinnedId: number | null = null
 
   constructor(
     private readonly token: string,
     private readonly chatId: string,
-  ) {
-    const fromEnv = Number(process.env.TELEGRAM_INTRO_MESSAGE_ID ?? "")
-    if (Number.isFinite(fromEnv) && fromEnv > 0) this.protectedIds.add(fromEnv)
-  }
+  ) {}
 
   getMessages(): ChannelMessage[] {
     return [...this.local.values()]
@@ -237,15 +256,37 @@ export class TelegramBroadcast implements Broadcast {
   async ensureIntro(
     payload: ChannelIntroPayload,
     message: FormattedMessage,
+    options?: EnsureIntroOptions,
   ): Promise<ChannelMessage | null> {
     await this.refreshProtectedFromPin()
 
-    const existingId = [...this.protectedIds][0] ?? null
+    const envId = Number(process.env.TELEGRAM_INTRO_MESSAGE_ID ?? "")
+    const existingId =
+      this.pinnedId ??
+      (Number.isFinite(envId) && envId > 0 ? envId : null)
     if (existingId) {
-      const edited = await this.tryEditIntro(existingId, message)
-      if (edited) return edited
+      // A pin (or known intro id) means never send a second banner — even if
+      // edit fails. Cold starts with mint=null must not blank a live pin;
+      // idle/waiting publishes pass allowClearMint to swap in the waiting copy.
+      if (payload.mint || options?.allowClearMint) {
+        const edited = await this.tryEditIntro(existingId, message)
+        if (edited) return edited
+      }
+      return {
+        id: String(existingId),
+        telegramMessageId: existingId,
+        kind: "intro",
+        html: message.html,
+        text: message.text,
+        createdAt: new Date().toISOString(),
+        editedAt: null,
+        editCount: 0,
+      }
     }
 
+    if (options?.createIfMissing === false) return null
+
+    const previousPin = this.pinnedId
     const banner = resolveBannerPath(payload.bannerPath)
     const sent = banner
       ? await this.sendPhoto(banner, message)
@@ -253,7 +294,8 @@ export class TelegramBroadcast implements Broadcast {
 
     const telegramId = sent.telegramMessageId
     if (telegramId) {
-      this.protectedIds.add(telegramId)
+      this.pinnedId = telegramId
+      this.protectedIds = new Set([telegramId])
       try {
         await this.api("pinChatMessage", {
           chat_id: this.chatId,
@@ -262,6 +304,16 @@ export class TelegramBroadcast implements Broadcast {
         })
       } catch (error) {
         console.error("[telegram] failed to pin intro", error)
+      }
+      if (previousPin && previousPin !== telegramId) {
+        try {
+          await this.api("deleteMessage", {
+            chat_id: this.chatId,
+            message_id: previousPin,
+          })
+        } catch {
+          /* old banner may already be gone */
+        }
       }
     }
     return sent
@@ -343,16 +395,19 @@ export class TelegramBroadcast implements Broadcast {
   }
 
   private async refreshProtectedFromPin() {
+    this.protectedIds = new Set()
+    this.pinnedId = null
     try {
       const chat = await this.api("getChat", { chat_id: this.chatId })
       const pinnedId = (chat.result as { pinned_message?: { message_id?: number } })?.pinned_message
         ?.message_id
-      if (pinnedId) this.protectedIds.add(pinnedId)
+      if (pinnedId) {
+        this.pinnedId = pinnedId
+        this.protectedIds.add(pinnedId)
+      }
     } catch {
       /* ignore */
     }
-    const fromEnv = Number(process.env.TELEGRAM_INTRO_MESSAGE_ID ?? "")
-    if (Number.isFinite(fromEnv) && fromEnv > 0) this.protectedIds.add(fromEnv)
   }
 
   /**
@@ -362,7 +417,7 @@ export class TelegramBroadcast implements Broadcast {
    */
   private async purgeRecentChannelPosts(count: number) {
     await this.refreshProtectedFromPin()
-    const limit = Math.max(0, Math.min(Math.floor(count), 500))
+    const limit = Math.max(0, Math.min(Math.floor(count), 5_000))
     if (limit === 0) return
 
     let tip = 0
@@ -399,7 +454,11 @@ export class TelegramBroadcast implements Broadcast {
     await this.api("setMyCommands", { commands: [] })
   }
 
-  private async api(method: string, body: Record<string, unknown>) {
+  private async api(
+    method: string,
+    body: Record<string, unknown>,
+    attempt = 0,
+  ): Promise<{ ok: boolean; description?: string; result: { message_id: number } }> {
     if (FORBIDDEN_PUBLIC_COMMANDS.some((command) => method.toLowerCase().includes(command))) {
       throw new Error("Refusing Telegram method that looks like a public command handler")
     }
@@ -412,9 +471,15 @@ export class TelegramBroadcast implements Broadcast {
     const payload = (await response.json()) as {
       ok: boolean
       description?: string
+      parameters?: { retry_after?: number }
       result: { message_id: number }
     }
     if (!payload.ok) {
+      const retryAfter = Number(payload.parameters?.retry_after)
+      if (attempt < 4 && Number.isFinite(retryAfter) && retryAfter > 0) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(20_000, retryAfter * 1000)))
+        return this.api(method, body, attempt + 1)
+      }
       throw new Error(payload.description ?? `Telegram ${method} failed`)
     }
     return payload
@@ -483,22 +548,54 @@ class DualBroadcast implements Broadcast {
   }
 
   async edit(id: string, message: FormattedMessage): Promise<ChannelMessage> {
-    const local = await this.preview.edit(id, message)
-    const remoteId = this.map.get(id)
-    if (remoteId) {
-      try {
-        const remote = await this.telegram.edit(remoteId, message)
-        return { ...local, telegramMessageId: remote.telegramMessageId }
-      } catch (error) {
-        console.error("[telegram] edit failed; preview still updated", error)
+    const hasLocal = this.preview.getMessages().some((item) => item.id === id)
+    if (hasLocal) {
+      const local = await this.preview.edit(id, message)
+      const remoteId = this.map.get(id)
+      if (remoteId) {
+        let lastError: unknown
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          try {
+            const remote = await this.telegram.edit(remoteId, message)
+            return { ...local, telegramMessageId: remote.telegramMessageId }
+          } catch (error) {
+            lastError = error
+            await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt))
+          }
+        }
+        console.error("[telegram] edit failed; preview still updated", lastError)
       }
+      return local
     }
-    return local
+
+    if (/^\d+$/.test(id)) {
+      const remote = await this.telegram.edit(id, message)
+      const local = await this.preview.send(message)
+      this.map.set(local.id, remote.id)
+      return { ...local, telegramMessageId: remote.telegramMessageId }
+    }
+
+    return this.preview.edit(id, message)
   }
 
   async delete(id: string): Promise<void> {
-    await this.preview.delete(id)
-    const remoteId = this.map.get(id)
+    let previewId = id
+    let remoteId = this.map.get(id) ?? (/^\d+$/.test(id) ? id : null)
+    if (!this.map.has(id) && /^\d+$/.test(id)) {
+      for (const [local, remote] of this.map) {
+        if (remote === id) {
+          previewId = local
+          remoteId = remote
+          break
+        }
+      }
+    }
+    try {
+      await this.preview.delete(previewId)
+    } catch {
+      /* preview may not know a restored telegram id */
+    }
+    this.map.delete(previewId)
     this.map.delete(id)
     if (remoteId) {
       try {
@@ -526,15 +623,16 @@ class DualBroadcast implements Broadcast {
   async ensureIntro(
     payload: ChannelIntroPayload,
     message: FormattedMessage,
+    options?: EnsureIntroOptions,
   ): Promise<ChannelMessage | null> {
-    const local = await this.preview.ensureIntro(payload, message)
+    const local = await this.preview.ensureIntro(payload, message, options)
     try {
-      const remote = await this.telegram.ensureIntro(payload, message)
+      const remote = await this.telegram.ensureIntro(payload, message, options)
       if (local && remote) {
         this.map.set(local.id, remote.id)
         return { ...local, telegramMessageId: remote.telegramMessageId }
       }
-      return local
+      return local ?? remote
     } catch (error) {
       console.error("[telegram] intro failed; preview still published", error)
       return local

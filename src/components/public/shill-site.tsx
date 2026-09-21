@@ -35,6 +35,53 @@ const LOOP_STEPS = [
   "and around again",
 ] as const
 
+const SOURCE_META: Record<
+  string,
+  { label: string; icon: string; pill: string }
+> = {
+  "pump.fun": {
+    label: "Pump.fun",
+    icon: "/brand/pump-fun.ico",
+    pill: "bg-emerald-400/15 text-emerald-700 ring-1 ring-emerald-500/25",
+  },
+  fomo: {
+    label: "FOMO",
+    icon: "/brand/fomo-family.ico",
+    pill: "bg-purple-900/30 text-purple-300 ring-1 ring-purple-400/25",
+  },
+  axiom: {
+    label: "Axiom",
+    icon: "",
+    pill: "bg-sky-900/30 text-sky-300 ring-1 ring-sky-400/25",
+  },
+}
+
+function SourcePill({
+  source,
+  className,
+}: {
+  source: string
+  className?: string
+}) {
+  const meta = SOURCE_META[source]
+  if (!meta) return null
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none",
+        meta.pill,
+        className,
+      )}
+    >
+      {meta.icon ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={meta.icon} alt="" width={10} height={10} className="h-2.5 w-2.5 rounded-sm object-contain" />
+      ) : null}
+      {meta.label}
+    </span>
+  )
+}
+
 function Flywheel() {
   const n = LOOP_STEPS.length
   return (
@@ -253,7 +300,11 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
                 : "bg-amber-300",
             )}
           />
-          {state.engine.live ? "Engine live" : "Engine paused"}
+          {!state.mint.address
+            ? "Waiting for SHILL tech to be live..."
+            : state.engine.live
+              ? "Engine live"
+              : "Engine paused"}
         </div>
         <span className="text-xs font-medium text-shill-deep/50">
           Snapshot window {state.engine.nextSnapshotRangeLabel}
@@ -270,7 +321,7 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
               className="text-sm"
             />
           ) : (
-            "—"
+            "waiting for SHILL tech to be live..."
           )}
         </Field>
         <Field label="Callers this window">
@@ -328,10 +379,11 @@ function LiveBoard({ state, error }: { state: PublicView | null; error: string |
             {state.windowCallouts.map((c) => (
               <span
                 key={c.id}
-                className="voice-chip aqua-chip max-w-full truncate rounded-full px-3 py-1.5 text-xs font-semibold text-shill-deep"
+                className="voice-chip aqua-chip inline-flex max-w-full items-center gap-1.5 truncate rounded-full py-1.5 pl-3 pr-2 text-xs font-semibold text-shill-deep"
                 title={c.wallet}
               >
-                {c.username}
+                <span className="truncate">{c.username}</span>
+                <SourcePill source={c.source} />
               </span>
             ))}
           </div>
@@ -358,24 +410,31 @@ function RoundRow({ round }: { round: PublicRound }) {
         {[
           { tag: "Latest callout", who: round.lastCaller },
           { tag: "Random callout", who: round.randomCaller },
-        ].map(({ tag, who }) => (
-          <div key={tag} className="min-w-0">
-            <div className="text-[10px] font-semibold tracking-[0.16em] text-shill-deep/45 uppercase">
-              {tag}
+        ].map(({ tag, who }) => {
+          return (
+            <div key={tag} className="min-w-0">
+              <div className="text-[10px] font-semibold tracking-[0.16em] text-shill-deep/45 uppercase">
+                {tag}
+              </div>
+              <div className="mt-1 truncate font-semibold text-shill-deep">
+                {who?.username ?? "—"}
+              </div>
+              {who ? (
+                <div className="mt-1">
+                  <SourcePill source={who.source} />
+                </div>
+              ) : null}
+              {who ? (
+                <WalletAddress
+                  className="mt-0.5 text-xs"
+                  address={who.wallet}
+                  short={who.walletShort}
+                  href={who.walletUrl}
+                />
+              ) : null}
             </div>
-            <div className="mt-1 truncate font-semibold text-shill-deep">
-              {who?.username ?? "—"}
-            </div>
-            {who ? (
-              <WalletAddress
-                className="mt-0.5 text-xs"
-                address={who.wallet}
-                short={who.walletShort}
-                href={who.walletUrl}
-              />
-            ) : null}
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/45 pt-3">
@@ -531,6 +590,19 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
                 SHILL reads the Pump.fun callout section, takes random snapshots, and pays the
                 wallets doing the talking. Automatically, on-chain, every {windowLabel}.
               </p>
+
+              {mint ? (
+                <div className="hero-line mt-5 flex max-w-3xl flex-wrap items-center justify-center gap-x-2 gap-y-1 px-1 text-sm text-shill-deep/75 sm:mt-6 sm:text-base">
+                  <span className="font-semibold tracking-wide">CA :</span>
+                  <WalletAddress
+                    address={mint}
+                    short={mint}
+                    href={mintUrl}
+                    className="min-w-0 max-w-full font-mono text-[11px] sm:text-sm"
+                    wrap
+                  />
+                </div>
+              ) : null}
 
               <div className="hero-line mt-7 flex w-full max-w-sm flex-col items-stretch gap-2.5 sm:mt-8 sm:max-w-none sm:flex-row sm:flex-wrap sm:items-center sm:justify-center sm:gap-3">
                 <a
@@ -801,7 +873,7 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
                   SHILL
                 </p>
                 <p className="truncate text-[11px] leading-snug text-shill-deep/55">
-                  Get some money where your mouth is.
+                  Speak up and take your money.
                 </p>
               </div>
             </div>

@@ -46,6 +46,16 @@ export function displayUsername(username: string): string {
   return trimmed.startsWith("@") ? trimmed : `@${trimmed}`
 }
 
+/** Human label for callout origin (FOMO / Pump.fun / Axiom). */
+export function calloutSourceLabel(source: string): string | null {
+  const s = source.trim().toLowerCase()
+  if (!s || s === "other" || s === "none" || s === "hydrated" || s === "demo-feed") return null
+  if (s.includes("fomo")) return "FOMO"
+  if (s.includes("pump")) return "Pump.fun"
+  if (s.includes("axiom")) return "Axiom"
+  return null
+}
+
 export function displayToken(token: string): string {
   const trimmed = token.trim()
   if (!trimmed) return "$UNKNOWN"
@@ -68,6 +78,9 @@ export function minutesLabel(minMs: number, maxMs: number): string {
 }
 
 export function formatAmount(amount: number, token: string): string {
+  if (canonicalToken(token) === "SOL") {
+    return `${formatSolAmount(amount)} SOL`
+  }
   return `${formatInteger(amount)} ${token}`
 }
 

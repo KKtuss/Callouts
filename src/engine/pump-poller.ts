@@ -1,7 +1,13 @@
 import { isDuplicateCalloutError } from "@/engine/collector"
 import {
+  collectPumpCallouts,
   homeFeedNextPageToken,
+  parseCalloutReplies,
   parseHomeFeedNewCallouts,
+  parsePumpCalloutFeed,
+  pumpCalloutApiUrl,
+  pumpCalloutListUrl,
+  pumpCalloutRepliesUrl,
   pumpHomeFeedNewUrl,
   type PumpCalloutRecord,
 } from "@/engine/pump-feed"
@@ -28,13 +34,23 @@ type IngestFn = (input: {
   silent?: boolean
 }) => Callout
 
-const FETCH_INIT: RequestInit = {
-  headers: { Accept: "application/json", "User-Agent": "callout-snap/0.1" },
-  cache: "no-store",
+function fetchInit(): RequestInit {
+  return {
+    headers: { Accept: "application/json", "User-Agent": "callout-snap/0.1" },
+    cache: "no-store",
+    signal: AbortSignal.timeout(8_000),
+  }
 }
 
 /** Pages of global newest feed to scan after mint switch / cold start. */
 const BACKFILL_PAGES = 12
+/** Extra pages on every live poll so a busy global feed does not hide this mint. */
+const LIVE_PAGES = 6
+/** Mint-scoped chronological pages. The list endpoint is empty for some coins. */
+const LIST_BACKFILL_PAGES = 2
+const LIST_LIVE_PAGES = 1
+/** `/callout/top` does not include replies; fetch follow-ups for this many originals. */
+const REPLY_FETCH_MAX = 20
 
 export class PumpCalloutPoller {
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -42,6 +58,7 @@ export class PumpCalloutPoller {
   private seenIds = new Set<string>()
   private windowKey = ""
   private needsBackfill = true
+  private polling = false
   connected = false
   lastPollAt: string | null = null
   lastError: string | null = null
@@ -58,6 +75,8 @@ export class PumpCalloutPoller {
     private readonly enabled: () => boolean = () => true,
     private readonly apiBase?: string,
     private readonly onStatus?: (status: PumpPollerStatus) => void,
+    private readonly clampHistoricalIntoWindow: () => boolean = () => true,
+    private readonly onPollComplete?: () => void | Promise<void>,
   ) {}
 
   status(): PumpPollerStatus {
@@ -96,6 +115,16 @@ export class PumpCalloutPoller {
   }
 
   async pollOnce(now = Date.now()): Promise<PumpCalloutRecord[]> {
+    if (this.polling) return []
+    this.polling = true
+    try {
+      return await this.pollOnceNow(now)
+    } finally {
+      this.polling = false
+    }
+  }
+
+  private async pollOnceNow(now: number): Promise<PumpCalloutRecord[]> {
     const cfg = this.config()
     const mint = cfg.coinMint
     if (!mint) {
@@ -104,31 +133,40 @@ export class PumpCalloutPoller {
       return []
     }
     this.resetWindowCounters()
+    this.lastError = null
 
-    // Historical catch-up still counts toward the window, but must not spam QUALIFIED.
-    const silent = this.needsBackfill
+    const backfill = this.needsBackfill
     const rows = await this.loadMintCallouts(mint)
     this.lastFeedCount = rows.length
     const windowStartMs = this.windowStart().getTime()
+    let changed = false
 
     for (const row of rows) {
-      if (this.seenIds.has(row.calloutId)) continue
-      if (row.createdAtMs > now) continue
+      if (this.seenIds.has(row.activityId)) continue
+      if (row.createdAtMs > now + 120_000) continue
+      const historical = backfill && row.createdAtMs < windowStartMs
+      if (historical && !this.clampHistoricalIntoWindow()) {
+        this.seenIds.add(row.activityId)
+        this.skipped += 1
+        continue
+      }
+      const capturedAtMs = historical ? windowStartMs : row.createdAtMs
       try {
         this.ingest({
           token: cfg.distributionToken,
           callerUsername: row.username,
           wallet: row.userId,
           source: "pump-fun",
-          capturedAt: new Date(row.createdAtMs).toISOString(),
-          id: `pump_${row.calloutId}`,
+          capturedAt: new Date(capturedAtMs).toISOString(),
+          id: `pump_${row.activityId}`,
           thesis: row.thesis,
-          silent,
+          silent: true,
         })
-        this.seenIds.add(row.calloutId)
-        if (row.createdAtMs >= windowStartMs) this.accepted += 1
+        changed = true
+        this.seenIds.add(row.activityId)
+        if (capturedAtMs >= windowStartMs) this.accepted += 1
       } catch (error) {
-        this.seenIds.add(row.calloutId)
+        this.seenIds.add(row.activityId)
         this.skipped += 1
         if (!isDuplicateCalloutError(error)) {
           this.lastError = error instanceof Error ? error.message : "Ingest failed"
@@ -137,35 +175,129 @@ export class PumpCalloutPoller {
     }
 
     this.connected = true
-    this.lastError = null
     this.lastPollAt = new Date(now).toISOString()
     this.onStatus?.(this.status())
+    if (changed) {
+      try {
+        await this.onPollComplete?.()
+      } catch (error) {
+        this.lastError = error instanceof Error ? error.message : "Qualified sync failed"
+      }
+    }
     return rows
   }
 
   /**
-   * Pump has no mint-scoped chronological API. `/callout/top/{mint}` ranks by peak
-   * multiple. Live newest callouts live on `/home-feed/new` (all coins) — we filter
-   * to the watched mint. Steady state polls page 1; after reset we backfill several pages.
+   * Mint-scoped `/callout/top` + `/callout/list?sortBy=TIMESTAMP`, plus
+   * global `/home-feed/new` filtered to this mint.
    */
   private async loadMintCallouts(mint: string): Promise<PumpCalloutRecord[]> {
-    const pages = this.needsBackfill ? BACKFILL_PAGES : 1
     const found: PumpCalloutRecord[] = []
-    let pageToken: string | null = null
+    const listPages = this.needsBackfill ? LIST_BACKFILL_PAGES : LIST_LIVE_PAGES
+    const homePages = this.needsBackfill ? BACKFILL_PAGES : LIVE_PAGES
 
-    for (let page = 0; page < pages; page += 1) {
-      const response = await this.fetchImpl(pumpHomeFeedNewUrl(this.apiBase, pageToken), FETCH_INIT)
+    const [topRows, listRows, homeFirst] = await Promise.all([
+      this.fetchTop(mint),
+      this.fetchListPage(mint, null),
+      this.fetchHomePage(null),
+    ])
+    found.push(...topRows)
+    found.push(...listRows.rows.filter((row) => row.coinMint === mint))
+    found.push(...homeFirst.rows.filter((row) => row.coinMint === mint))
+
+    let listToken = listRows.next
+    for (let page = 1; page < listPages && listToken; page += 1) {
+      const next = await this.fetchListPage(mint, listToken)
+      found.push(...next.rows.filter((row) => row.coinMint === mint))
+      listToken = next.next
+    }
+
+    let pageToken = homeFirst.next
+    for (let page = 1; page < homePages && pageToken; page += 1) {
+      const next = await this.fetchHomePage(pageToken)
+      found.push(...next.rows.filter((row) => row.coinMint === mint))
+      pageToken = next.next
+    }
+
+    this.needsBackfill = false
+    const originals = uniqueById(found).filter(
+      (row) => row.kind === "callout" && row.coinMint === mint,
+    )
+    const replyBatches = await Promise.all(
+      originals.slice(0, REPLY_FETCH_MAX).map((row) => this.fetchReplies(row)),
+    )
+    found.push(...replyBatches.flat())
+    return uniqueById(found).sort((a, b) => b.createdAtMs - a.createdAtMs)
+  }
+
+  private async fetchReplies(base: PumpCalloutRecord): Promise<PumpCalloutRecord[]> {
+    try {
+      const response = await this.fetchImpl(pumpCalloutRepliesUrl(base.calloutId, this.apiBase), fetchInit())
+      if (!response.ok) return []
+      return parseCalloutReplies(base, await response.json())
+    } catch {
+      return []
+    }
+  }
+
+  private async fetchTop(mint: string): Promise<PumpCalloutRecord[]> {
+    try {
+      const top = await this.fetchImpl(pumpCalloutApiUrl(mint, this.apiBase), fetchInit())
+      if (!top.ok) {
+        this.lastError = `Pump callout/top HTTP ${top.status}`
+        return []
+      }
+      return collectPumpCallouts(await top.json()).filter((row) => row.coinMint === mint)
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : "Pump callout/top failed"
+      return []
+    }
+  }
+
+  private async fetchListPage(
+    mint: string,
+    pageToken: string | null,
+  ): Promise<{ rows: PumpCalloutRecord[]; next: string | null }> {
+    try {
+      const response = await this.fetchImpl(pumpCalloutListUrl(mint, this.apiBase, pageToken), fetchInit())
+      if (response.status === 429) {
+        return { rows: [], next: null }
+      }
+      if (!response.ok) {
+        throw new Error(`Pump callout/list HTTP ${response.status}`)
+      }
+      const payload: unknown = await response.json()
+      return {
+        rows: parsePumpCalloutFeed(payload),
+        next: homeFeedNextPageToken(payload),
+      }
+    } catch (error) {
+      if (!this.lastError) {
+        this.lastError = error instanceof Error ? error.message : "Pump callout/list failed"
+      }
+      return { rows: [], next: null }
+    }
+  }
+
+  private async fetchHomePage(
+    pageToken: string | null,
+  ): Promise<{ rows: PumpCalloutRecord[]; next: string | null }> {
+    try {
+      const response = await this.fetchImpl(pumpHomeFeedNewUrl(this.apiBase, pageToken), fetchInit())
       if (!response.ok) {
         throw new Error(`Pump home-feed/new HTTP ${response.status}`)
       }
       const payload: unknown = await response.json()
-      found.push(...parseHomeFeedNewCallouts(payload).filter((row) => row.coinMint === mint))
-      pageToken = homeFeedNextPageToken(payload)
-      if (!pageToken) break
+      return {
+        rows: parseHomeFeedNewCallouts(payload),
+        next: homeFeedNextPageToken(payload),
+      }
+    } catch (error) {
+      if (!this.lastError) {
+        this.lastError = error instanceof Error ? error.message : "Pump home-feed failed"
+      }
+      return { rows: [], next: null }
     }
-
-    this.needsBackfill = false
-    return uniqueById(found).sort((a, b) => b.createdAtMs - a.createdAtMs)
   }
 
   private async tick() {
@@ -180,7 +312,7 @@ export class PumpCalloutPoller {
       }
     }
     if (this.stopped) return
-    const delay = Math.max(2_000, this.intervalMs())
+    const delay = Math.max(1_000, this.intervalMs())
     this.timer = setTimeout(() => {
       void this.tick()
     }, delay)
@@ -198,7 +330,7 @@ export class PumpCalloutPoller {
 function uniqueById(rows: PumpCalloutRecord[]): PumpCalloutRecord[] {
   const byId = new Map<string, PumpCalloutRecord>()
   for (const row of rows) {
-    if (!byId.has(row.calloutId)) byId.set(row.calloutId, row)
+    if (!byId.has(row.activityId)) byId.set(row.activityId, row)
   }
   return [...byId.values()]
 }

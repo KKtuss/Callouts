@@ -10,14 +10,19 @@ import type { FormattedMessage } from "@/telegram/messages"
 const walletA = "GC9gKkJjieLPTqDRtm3u6KzL7mhVvMdM4DfMa7aV44ke"
 const walletB = "8yKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
 
+function syncLifetime(store: EngineStore, collector: CalloutCollector) {
+  store.rememberLifetimeCallouts(collector.all())
+}
+
 describe("MigrationMonitor", () => {
-  it("pays 10M to a random holder with >=3 accepted callouts after bonding", async () => {
+  it("splits remaining treasury supply across bond lottery winners after bonding", async () => {
     const collector = new CalloutCollector()
     const store = new EngineStore(() => collector.all(), () => [], {
       ...DEFAULT_CONFIG,
       coinMint: AIDEN_MINT,
       distributionToken: "AIDEN",
       migrationBonusAmount: 10_000_000,
+      migrationWinnerCount: 5,
       migrationMinCallouts: 3,
       mockTxDelayMs: 0,
     })
@@ -44,6 +49,7 @@ describe("MigrationMonitor", () => {
         source: "pump-fun",
       })
     }
+    syncLifetime(store, collector)
 
     const treasury = new MockTreasury(() => store.config, async () => undefined, 1_000_000_000)
     store.treasuryBalance = treasury.balance
@@ -61,11 +67,14 @@ describe("MigrationMonitor", () => {
 
     const audit = await monitor.pollOnce()
     expect(audit?.confirmationStatus).toBe("confirmed")
-    expect(audit?.amount).toBe(10_000_000)
+    expect(audit?.winners).toHaveLength(2)
+    expect(audit?.amount).toBe(1_000_000_000)
+    expect(audit?.winners[0]?.amount).toBe(500_000_000)
     expect(audit?.winner?.wallet).toBe(walletB)
     expect(audit?.holderCount).toBe(2)
     expect(store.migrationPaid).toBe(true)
-    expect(treasury.balance).toBe(1_000_000_000 - 10_000_000)
+    expect(store.migrationBonded).toBe(true)
+    expect(treasury.balance).toBe(0)
     expect(store.listMigrations()).toHaveLength(1)
   })
 
@@ -88,6 +97,7 @@ describe("MigrationMonitor", () => {
         source: "pump-fun",
       })
     }
+    syncLifetime(store, collector)
     const treasury = new MockTreasury(() => store.config, async () => undefined, 1_000_000_000)
     const monitor = new MigrationMonitor(
       store,
@@ -127,6 +137,7 @@ describe("MigrationMonitor", () => {
         source: "pump-fun",
       })
     }
+    syncLifetime(store, collector)
 
     const treasury = new MockTreasury(() => store.config, async () => undefined, 1_000_000_000)
     const clock = { now: () => new Date("2026-09-19T18:00:00.000Z"), sleep: async () => undefined }
@@ -172,8 +183,65 @@ describe("MigrationMonitor", () => {
     expect(kinds).not.toContain("send:bond")
     expect(kinds).toContain("send:migration")
     expect(kinds.some((kind) => kind.endsWith(":distribution"))).toBe(true)
-    expect(broadcast.sequence.some((item) => item.text.includes("BONDING BONUS SENT"))).toBe(true)
+    expect(broadcast.sequence.some((item) => item.text.includes("BONDING LOTTERY SENT"))).toBe(true)
     expect(broadcast.sequence.some((item) => item.text.includes("TX:"))).toBe(true)
+  })
+
+  it("skips the lottery when the treasury is not live and does not telegram", async () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(() => collector.all(), () => broadcast.getMessages(), {
+      ...DEFAULT_CONFIG,
+      coinMint: AIDEN_MINT,
+      distributionToken: "AIDEN",
+      mockTxDelayMs: 0,
+    })
+    store.watchStartedAt = "2026-09-19T16:00:00.000Z"
+    for (let i = 0; i < 3; i += 1) {
+      collector.ingest({
+        id: `a${i}`,
+        token: "AIDEN",
+        callerUsername: "alpha",
+        wallet: walletA,
+        capturedAt: new Date(Date.parse("2026-09-19T16:10:00.000Z") + i * 60_000).toISOString(),
+        source: "pump-fun",
+      })
+    }
+    syncLifetime(store, collector)
+
+    class DryTreasury extends MockTreasury {
+      override get live() {
+        return false
+      }
+    }
+
+    let persisted = 0
+    const treasury = new DryTreasury(() => store.config, async () => undefined, 1_000_000_000)
+    const monitor = new MigrationMonitor(
+      store,
+      collector,
+      treasury,
+      { now: () => new Date("2026-09-19T18:00:00.000Z"), sleep: async () => undefined },
+      { int: () => 0, bytes: () => Buffer.alloc(32, 1) },
+      async () => true,
+      async () => new Response(JSON.stringify({ complete: true, symbol: "AIDEN" }), { status: 200 }),
+      broadcast,
+      () => {
+        persisted += 1
+      },
+    )
+
+    const audit = await monitor.pollOnce()
+    expect(audit).toBeNull()
+    expect(store.migrationPaid).toBe(true)
+    expect(store.migrationBonded).toBe(true)
+    expect(persisted).toBe(1)
+    expect(treasury.balance).toBe(1_000_000_000)
+    expect(broadcast.sequence).toHaveLength(0)
+    expect(store.listMigrations()).toHaveLength(0)
+
+    expect(await monitor.pollOnce()).toBeNull()
+    expect(persisted).toBe(1)
   })
 })
 

@@ -50,6 +50,14 @@ export type MigrationSelection = {
   selectedAt: string
 }
 
+export type MigrationMultiSelection = {
+  winners: MigrationCandidate[]
+  pool: MigrationCandidate[]
+  entropyHex: string
+  method: "node:crypto.randomInt"
+  selectedAt: string
+}
+
 export function selectMigrationWinner(
   candidates: MigrationCandidate[],
   now: Date = new Date(),
@@ -65,6 +73,34 @@ export function selectMigrationWinner(
     winner,
     pool: candidates,
     index,
+    entropyHex: entropyHex(random),
+    method: "node:crypto.randomInt",
+    selectedAt: now.toISOString(),
+  }
+}
+
+/** Draw up to `count` unique winners without replacement. */
+export function selectMigrationWinners(
+  candidates: MigrationCandidate[],
+  count: number,
+  now: Date = new Date(),
+  random: SecureRandom = nodeSecureRandom,
+): MigrationMultiSelection {
+  if (candidates.length === 0) {
+    throw new Error("No migration candidates")
+  }
+  const want = Math.max(1, Math.min(count, candidates.length))
+  const remaining = [...candidates]
+  const winners: MigrationCandidate[] = []
+  for (let i = 0; i < want; i += 1) {
+    const index = pickIndex(remaining.length, random)
+    const picked = remaining.splice(index, 1)[0]
+    if (!picked) throw new Error("Migration multi-selection produced an empty pick")
+    winners.push(picked)
+  }
+  return {
+    winners,
+    pool: candidates,
     entropyHex: entropyHex(random),
     method: "node:crypto.randomInt",
     selectedAt: now.toISOString(),

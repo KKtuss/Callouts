@@ -187,7 +187,7 @@ export class AxiomCalloutPoller {
       this.onStatus?.(this.status())
     }
     if (this.stopped) return
-    const delay = Math.max(2_000, this.intervalMs())
+    const delay = Math.max(1_000, this.intervalMs())
     this.timer = setTimeout(() => {
       void this.tick()
     }, delay)

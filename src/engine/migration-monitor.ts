@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import { buildMigrationCandidates, selectMigrationWinner } from "@/engine/migration"
+import { buildMigrationCandidates, selectMigrationWinners } from "@/engine/migration"
 import type { CalloutCollector } from "@/engine/collector"
 import { EngineStore } from "@/engine/store"
 import { txPending, type Treasury } from "@/engine/treasury"
@@ -33,6 +33,7 @@ export class MigrationMonitor {
     private readonly holderCheck: HolderCheck = walletHoldsMint,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly broadcast: Broadcast | null = null,
+    private readonly persistWatch: (() => Promise<void> | void) | null = null,
   ) {}
 
   start() {
@@ -66,7 +67,10 @@ export class MigrationMonitor {
       return null
     }
 
-    const candidates = buildMigrationCandidates(this.collector.all(), cfg.migrationMinCallouts)
+    const candidates = buildMigrationCandidates(
+      this.store.listLifetimeCallouts(),
+      cfg.migrationMinCallouts,
+    )
     this.store.migrationEligibleCount = candidates.length
 
     let status
@@ -93,6 +97,17 @@ export class MigrationMonitor {
       return null
     }
 
+    if (!this.treasury.live) {
+      this.store.migrationPaid = true
+      this.store.log(
+        "info",
+        "Bonded — lottery skipped (no treasury key). Marked settled so it will not replay.",
+      )
+      this.store.emitState()
+      await this.persistQuietly()
+      return null
+    }
+
     return this.payMigrationBonus(mint, candidates)
   }
 
@@ -102,6 +117,11 @@ export class MigrationMonitor {
   ): Promise<MigrationAudit> {
     const cfg = this.store.config
     const now = this.clock.now()
+    const winnerCount = Math.max(1, cfg.migrationWinnerCount || 5)
+
+    await this.treasury.refreshBalance()
+    const remainingSupply = Math.max(0, Math.floor(this.treasury.balance))
+
     const audit: MigrationAudit = {
       id: `mig_${randomBytes(8).toString("hex")}`,
       mint,
@@ -112,9 +132,11 @@ export class MigrationMonitor {
       eligibleCount: candidates.length,
       holderCount: 0,
       winner: null,
+      winners: [],
       selectionEntropyHex: "",
-      amount: cfg.migrationBonusAmount,
+      amount: remainingSupply,
       transaction: null,
+      transactions: [],
       confirmationStatus: "in_progress",
       skipReason: null,
       telegramMessageIds: {},
@@ -122,11 +144,17 @@ export class MigrationMonitor {
     }
     this.store.upsertMigration(audit)
 
+    this.store.log(
+      "info",
+      `[wallet] Bond lottery starting | remaining=${remainingSupply} ${cfg.distributionToken} | seats=${winnerCount}`,
+    )
+
     await this.publishQuietly(
       migrationDetected({
         eligibleCount: candidates.length,
-        bonusAmount: cfg.migrationBonusAmount,
+        bonusAmount: remainingSupply,
         distributionToken: cfg.distributionToken,
+        winnerCount,
       }),
       (id) => {
         audit.telegramMessageIds.detected = id
@@ -138,6 +166,10 @@ export class MigrationMonitor {
         audit,
         `No wallets with ≥${cfg.migrationMinCallouts} accepted callouts since monitoring started`,
       )
+    }
+
+    if (remainingSupply <= 0) {
+      return this.finishSkipped(audit, "Treasury token balance is empty — nothing left to split")
     }
 
     const holderWallets = await filterHolders(
@@ -156,83 +188,109 @@ export class MigrationMonitor {
       )
     }
 
-    const selection = selectMigrationWinner(holderCandidates, now, this.random)
-    audit.winner = {
-      wallet: selection.winner.wallet,
-      callerUsername: selection.winner.callerUsername,
-      calloutCount: selection.winner.calloutCount,
+    const selection = selectMigrationWinners(holderCandidates, winnerCount, now, this.random)
+    const perWinner = Math.floor(remainingSupply / selection.winners.length)
+    if (perWinner <= 0) {
+      return this.finishSkipped(
+        audit,
+        `Remaining supply ${remainingSupply} is too small to split across ${selection.winners.length} winners`,
+      )
     }
+
+    audit.winners = selection.winners.map((row) => ({
+      wallet: row.wallet,
+      callerUsername: row.callerUsername,
+      calloutCount: row.calloutCount,
+      amount: perWinner,
+    }))
+    audit.winner = audit.winners[0] ?? null
     audit.selectionEntropyHex = selection.entropyHex
+    audit.amount = perWinner * selection.winners.length
     this.store.upsertMigration(audit)
+
     await this.publishQuietly(
       migrationWinner({
-        callerUsername: selection.winner.callerUsername,
-        wallet: selection.winner.wallet,
-        calloutCount: selection.winner.calloutCount,
-        amount: cfg.migrationBonusAmount,
+        winners: audit.winners,
         distributionToken: cfg.distributionToken,
         explorer: this.explorer(),
       }),
     )
 
-    const pending = txPending({
-      kind: "migration_bonus",
-      calloutId: selection.winner.callouts[selection.winner.callouts.length - 1]?.id ?? selection.winner.wallet,
-      token: cfg.distributionToken,
-      callerUsername: selection.winner.callerUsername,
-      wallet: selection.winner.wallet,
-      amount: cfg.migrationBonusAmount,
-      distributionToken: cfg.distributionToken,
-    })
-    audit.transaction = pending
+    const pendingTxs = audit.winners.map((row) =>
+      txPending({
+        kind: "migration_bonus",
+        calloutId:
+          selection.winners.find((w) => w.wallet === row.wallet)?.callouts.at(-1)?.id ?? row.wallet,
+        token: cfg.distributionToken,
+        callerUsername: row.callerUsername,
+        wallet: row.wallet,
+        amount: row.amount,
+        distributionToken: cfg.distributionToken,
+      }),
+    )
+    audit.transactions = pendingTxs
+    audit.transaction = pendingTxs[0] ?? null
     this.store.upsertMigration(audit)
 
     const distMsg = await this.publishQuietly(distributionPreparing(), (id) => {
       audit.telegramMessageIds.distribution = id
     })
-    if (distMsg) {
-      await this.editQuietly(distMsg.id, distributionSending(pending, [], this.explorer()))
+    if (distMsg && pendingTxs[0]) {
+      await this.editQuietly(distMsg.id, distributionSending(pendingTxs[0], pendingTxs.slice(1), this.explorer()))
     }
 
-    try {
-      const result = await this.treasury.send({
-        wallet: selection.winner.wallet,
-        amount: cfg.migrationBonusAmount,
-        distributionToken: cfg.distributionToken,
-      })
-      pending.signature = result.signature
-      pending.explorerUrl = result.explorerUrl
-      pending.status = "confirmed"
-      pending.confirmedAt = result.confirmedAt
-      audit.confirmationStatus = "confirmed"
-      audit.completedAt = this.clock.now().toISOString()
-      this.store.treasuryBalance = this.treasury.balance
-      this.store.migrationPaid = true
-      this.store.upsertMigration(audit)
-      this.store.log(
-        "info",
-        `Migration bonus: ${cfg.migrationBonusAmount} ${cfg.distributionToken} → ${selection.winner.callerUsername}`,
-      )
-    } catch (error) {
-      pending.status = "failed"
-      pending.error = error instanceof Error ? error.message : "Migration send failed"
-      audit.confirmationStatus = "partial_failure"
-      audit.skipReason = pending.error
-      audit.completedAt = this.clock.now().toISOString()
-      this.store.migrationPaid = true
-      this.store.upsertMigration(audit)
-      this.store.log("error", pending.error)
+    let failures = 0
+    for (const pending of pendingTxs) {
+      try {
+        this.store.log(
+          "info",
+          `[wallet] Bond lottery send ${pending.amount} ${pending.distributionToken} → ${pending.callerUsername}`,
+        )
+        const result = await this.treasury.send({
+          wallet: pending.wallet,
+          amount: pending.amount,
+          distributionToken: pending.distributionToken,
+        })
+        pending.signature = result.signature
+        pending.explorerUrl = result.explorerUrl
+        pending.status = "confirmed"
+        pending.confirmedAt = result.confirmedAt
+      } catch (error) {
+        failures += 1
+        pending.status = "failed"
+        pending.error = error instanceof Error ? error.message : "Migration send failed"
+        this.store.log("error", `[wallet] Bond lottery send FAILED: ${pending.error}`)
+      }
     }
 
+    audit.transactions = pendingTxs
+    audit.transaction = pendingTxs[0] ?? null
+    audit.confirmationStatus =
+      failures === 0 ? "confirmed" : failures === pendingTxs.length ? "partial_failure" : "partial_failure"
+    if (failures === pendingTxs.length) {
+      audit.skipReason = pendingTxs.find((tx) => tx.error)?.error ?? "All bond lottery sends failed"
+    }
+    audit.completedAt = this.clock.now().toISOString()
+    this.store.treasuryBalance = this.treasury.balance
+    this.store.migrationPaid = true
+    this.store.migrationBonded = true
+    this.store.upsertMigration(audit)
+    this.store.log(
+      "info",
+      `[wallet] Bond lottery done | winners=${selection.winners.length} | each=${perWinner} | failures=${failures}`,
+    )
+
     if (distMsg) {
-      await this.editQuietly(distMsg.id, distributionConfirmed([pending], this.explorer()))
+      await this.editQuietly(distMsg.id, distributionConfirmed(pendingTxs, this.explorer()))
     }
     const finalMsg = await this.publishQuietly(
       migrationFinal({
-        callerUsername: selection.winner.callerUsername,
-        wallet: selection.winner.wallet,
-        tx: pending,
-        amount: cfg.migrationBonusAmount,
+        winners: audit.winners.map((row, i) => ({
+          callerUsername: row.callerUsername,
+          wallet: row.wallet,
+          amount: row.amount,
+          tx: pendingTxs[i]!,
+        })),
         distributionToken: cfg.distributionToken,
         explorer: this.explorer(),
       }),
@@ -241,6 +299,7 @@ export class MigrationMonitor {
       },
     )
     if (finalMsg) this.store.upsertMigration(audit)
+    await this.persistQuietly()
     return audit
   }
 
@@ -252,7 +311,20 @@ export class MigrationMonitor {
     this.store.upsertMigration(audit)
     this.store.log("warn", reason)
     await this.publishQuietly(migrationSkipped(reason))
+    await this.persistQuietly()
     return audit
+  }
+
+  private async persistQuietly() {
+    if (!this.persistWatch) return
+    try {
+      await this.persistWatch()
+    } catch (error) {
+      this.store.log(
+        "warn",
+        error instanceof Error ? error.message : "Failed to persist bond-lottery settlement",
+      )
+    }
   }
 
   private applyBondProgress(status: CoinBondingStatus) {
