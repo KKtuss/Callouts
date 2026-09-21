@@ -40,6 +40,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
   migrationMinCallouts: 3,
   migrationPollMs: 15_000,
   creatorRewardShareBps: 1_000,
+  fomoTreasuryWallet: null,
 }
 
 export class EngineStore {
@@ -58,6 +59,8 @@ export class EngineStore {
   watchStartedAt: string | null = null
   migrationBonded = false
   migrationPaid = false
+  /** True only after this watch has seen the curve still open. */
+  migrationSawOpen = false
   migrationLastCheckAt: string | null = null
   migrationLastError: string | null = null
   migrationEligibleCount = 0
@@ -204,7 +207,7 @@ export class EngineStore {
       telegramConnected: this.telegramConnected,
       telegramChannelId: this.telegramChannelId,
       calloutsInWindow: this.getCallouts().filter((c) =>
-        isCalloutInCurrentWindow(c.capturedAt, this.lastSnapshotAt, this.startedAt),
+        isCalloutInCurrentWindow(c.capturedAt, this.lastSnapshotAt, this.windowStartIso()),
       ).length,
       treasuryPublicAddress: this.treasuryPublicAddress,
       treasuryBalance: this.treasuryBalance,
@@ -245,6 +248,11 @@ export class EngineStore {
       this.migrations = this.migrations.map((item, i) => (i === index ? audit : item))
     }
     this.emitState()
+  }
+
+  /** First snapshot uses this; later windows use lastSnapshotAt. Never isolate boot time. */
+  windowStartIso(): string {
+    return this.lastSnapshotAt ?? this.watchStartedAt ?? this.startedAt
   }
 
   listAudits(): SnapshotAudit[] {
@@ -292,12 +300,23 @@ export class EngineStore {
     this.watchStartedAt = at
     this.migrationBonded = false
     this.migrationPaid = false
+    this.migrationSawOpen = false
     this.migrationLastCheckAt = null
     this.migrationLastError = null
     this.migrationEligibleCount = 0
     this.migrationProgressPercent = null
     this.migrationSolRaised = null
     this.migrationSolTarget = PUMP_BOND_TARGET_SOL
+  }
+
+  /** Drop in-memory history that belongs to a generation this wipe already invalidated. */
+  dropHistoryAtOrBefore(iso: string) {
+    const ms = Date.parse(iso)
+    if (!Number.isFinite(ms)) return
+    this.audits = this.audits.filter((audit) => Date.parse(audit.snapshotTimestamp) > ms)
+    this.lifetimeCallouts = this.lifetimeCallouts.filter((callout) => Date.parse(callout.capturedAt) > ms)
+    this.migrations = this.migrations.filter((row) => Date.parse(row.detectedAt) > ms)
+    if (this.lastSnapshotAt && Date.parse(this.lastSnapshotAt) <= ms) this.lastSnapshotAt = null
   }
 
   /** Wipe rounds, bonuses, and window clock when the watched mint changes. */
@@ -348,8 +367,12 @@ export class EngineStore {
     const current = this.nextSnapshotAt ? Date.parse(this.nextSnapshotAt) : NaN
     const last = this.lastSnapshotAt ? Date.parse(this.lastSnapshotAt) : 0
     if (last && incoming <= last + 2_000) return
-    if (Number.isFinite(current) && current > now && incoming <= now) return
-    if (Number.isFinite(current) && current > now && incoming > now && incoming < current) return
+    // A time that already passed is not a schedule. Leaving it makes OPS say "imminent" forever.
+    if (incoming <= now) {
+      if (Number.isFinite(current) && current <= now) this.nextSnapshotAt = null
+      return
+    }
+    if (Number.isFinite(current) && current > now && incoming < current) return
     this.nextSnapshotAt = nextSnapshotAt
   }
 

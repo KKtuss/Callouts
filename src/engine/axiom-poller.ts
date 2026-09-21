@@ -26,6 +26,7 @@ type IngestFn = (input: {
   id?: string
   thesis?: string
   silent?: boolean
+  mint?: string
 }) => Callout
 
 export class AxiomCalloutPoller {
@@ -129,6 +130,7 @@ export class AxiomCalloutPoller {
           capturedAt: new Date(row.createdAtMs).toISOString(),
           id: `axiom_${row.calloutId}`,
           thesis: row.thesis,
+          mint,
         })
         this.seenIds.add(row.calloutId)
         if (row.createdAtMs >= windowStartMs) this.accepted += 1

@@ -1,5 +1,11 @@
 import { AxiomCalloutPoller } from "@/engine/axiom-poller"
 import { CalloutCollector } from "@/engine/collector"
+import {
+  decryptTreasuryKey,
+  encryptTreasuryKey,
+  loadDurableConfig,
+  saveDurableConfig,
+} from "@/engine/durable-config"
 import { CalloutFeeder } from "@/engine/feeder"
 import { FomoThesesPoller } from "@/engine/fomo-poller"
 import { MigrationMonitor } from "@/engine/migration-monitor"
@@ -9,7 +15,13 @@ import { DEFAULT_CONFIG, EngineStore } from "@/engine/store"
 import { SolanaTreasury } from "@/engine/solana-treasury"
 import type { Treasury } from "@/engine/treasury"
 import type { EngineConfig } from "@/engine/types"
-import { DEFAULT_MIGRATION_BONUS, fetchCoinMetadata, isMintAddress, resolveCoinFromEnv } from "@/lib/coin"
+import {
+  DEFAULT_MIGRATION_BONUS,
+  fetchCoinBondingStatus,
+  fetchCoinMetadata,
+  isMintAddress,
+  resolveCoinFromEnv,
+} from "@/lib/coin"
 import {
   clearPinCache,
   expandCallouts,
@@ -22,6 +34,8 @@ import {
   type PersistedCaller,
 } from "@/engine/persist-watch"
 import { createBroadcast } from "@/telegram/broadcast"
+import { bumpEpoch, claimLeadership, localEpochNow, noteEpoch, readEpoch, touchLeaderWork } from "@/engine/watch-kv"
+import { after } from "next/server"
 
 export type Runtime = {
   engine: SnapshotEngine
@@ -130,6 +144,7 @@ function loadConfig(): EngineConfig {
     migrationMinCallouts: envNumber("MIGRATION_MIN_CALLOUTS", DEFAULT_CONFIG.migrationMinCallouts),
     migrationPollMs: envNumber("MIGRATION_POLL_MS", DEFAULT_CONFIG.migrationPollMs),
     creatorRewardShareBps: envNumber("CREATOR_REWARD_SHARE_BPS", DEFAULT_CONFIG.creatorRewardShareBps),
+    fomoTreasuryWallet: process.env.FOMO_TREASURY_WALLET?.trim() || null,
   }
 }
 
@@ -164,6 +179,10 @@ export function startRuntime(): Runtime {
   store.axiomIngest.cookieConfigured = Boolean(process.env.AXIOM_COOKIE?.trim())
   const persistedLedger = readPersistedWatch()
   if (persistedLedger && persistedLedger.mint === store.config.coinMint) {
+    if (persistedLedger.wipedAt) {
+      store.dropHistoryAtOrBefore(persistedLedger.wipedAt)
+      store.watchStartedAt = persistedLedger.wipedAt
+    }
     store.hydrateLedger(persistedLedger.lastSnapshotAt ?? null, persistedLedger.rounds ?? [])
     store.hydrateScheduler(
       persistedLedger.nextSnapshotAt ?? null,
@@ -172,11 +191,22 @@ export function startRuntime(): Runtime {
     store.hydrateMigration(persistedLedger.migrationPaid === true)
     if (persistedLedger.lifetimeCallouts?.length) {
       store.hydrateLifetimeCallouts(
-        expandCallouts(persistedLedger.lifetimeCallouts, store.config.distributionToken),
+        expandCallouts(persistedLedger.lifetimeCallouts, store.config.distributionToken, store.config.coinMint),
       )
     }
     if (store.lastSnapshotAt) collector.dropAtOrBefore(store.lastSnapshotAt)
-    hydrateCollectorCallouts(collector, store.config.distributionToken, persistedLedger.callouts, store.lastSnapshotAt ?? store.startedAt)
+    hydrateCollectorCallouts(
+      collector,
+      store.config.distributionToken,
+      persistedLedger.callouts,
+      store.windowStartIso(),
+      store.config.coinMint,
+    )
+    collector.dropMatching(
+      (row) =>
+        Boolean(row.mint && store.config.coinMint && row.mint !== store.config.coinMint) ||
+        (!row.mint && row.id.startsWith("fomo_family_")),
+    )
   }
 
   const envKey = process.env.TREASURY_PRIVATE_KEY?.trim()
@@ -218,7 +248,7 @@ export function startRuntime(): Runtime {
     (input) => engine.ingestCallout(input),
     () => store.config,
     () => pollMs,
-    () => new Date(store.lastSnapshotAt ?? store.startedAt),
+    () => new Date(store.windowStartIso()),
     fetch,
     () => store.config.pumpIngestEnabled,
     process.env.PUMP_CALLOUT_API_BASE,
@@ -235,7 +265,7 @@ export function startRuntime(): Runtime {
     (input) => engine.ingestCallout(input),
     () => store.config,
     () => axiomPollMs,
-    () => new Date(store.lastSnapshotAt ?? store.startedAt),
+    () => new Date(store.windowStartIso()),
     fetch,
     () => store.config.axiomIngestEnabled,
     process.env.AXIOM_CALLOUT_API_BASE,
@@ -247,13 +277,14 @@ export function startRuntime(): Runtime {
   )
 
   const fomoPollMs = envNumber("FOMO_THESIS_POLL_MS", 20_000)
-  const fomoEnabled = () =>
-    process.env.FOMO_INGEST !== "false" && Boolean(process.env.FOMO_API_KEY?.trim())
+  // Theses come from the opened fomo.family window (scripts/watch-fomo-browser.mjs).
+  // Do not open fomoapi from the server.
+  const fomoEnabled = () => false
   const fomoPoller = new FomoThesesPoller(
     (input) => engine.ingestCallout(input),
     () => store.config,
     () => fomoPollMs,
-    () => new Date(store.lastSnapshotAt ?? store.startedAt),
+    () => new Date(store.windowStartIso()),
     fetch,
     fomoEnabled,
     process.env.FOMO_API_BASE,
@@ -266,7 +297,7 @@ export function startRuntime(): Runtime {
       const tag = `[fomo] accepted=${status.accepted} feed=${status.lastFeedCount} unresolved=${status.unresolved} err=${status.lastError ?? "none"}`
       store.log("info", tag)
     },
-    process.env.FOMO_API_KEY ?? "",
+    "",
     undefined,
     // Wallet REST is 2,500 credits — only when explicitly enabled with budget.
     process.env.FOMO_PAID_WALLET_RESOLVE === "true",
@@ -292,18 +323,15 @@ export function startRuntime(): Runtime {
   }
 
   if (store.config.pumpIngestEnabled) {
-    pumpPoller.start()
     store.log("info", `Watching Pump.fun callouts for ${store.config.coinMint}`)
   }
 
   if (store.config.axiomIngestEnabled) {
-    axiomPoller.start()
     store.log("info", `Watching Axiom callouts for ${store.config.coinMint}`)
   }
 
-  if (fomoEnabled() && store.config.coinMint) {
-    fomoPoller.start()
-    store.log("info", `Watching FOMO theses for ${store.config.coinMint}`)
+  if (store.config.coinMint) {
+    store.log("info", `FOMO theses come from the opened fomo.family window for ${store.config.coinMint}`)
   }
 
   engine.start()
@@ -325,24 +353,82 @@ export function startRuntime(): Runtime {
 export function getRuntime(): Runtime {
   const runtime = startRuntime()
   globalRef.__calloutHydrate ??= bootstrapRuntime(runtime)
-  // Vercel serverless freezes kill timers/pollers. On each wake, restart them
-  // when a mint is configured — without resetting an already-armed future snapshot.
-  const mint = runtime.store.config.coinMint
-  if (mint) {
-    if (runtime.store.config.pumpIngestEnabled) runtime.pumpPoller.start()
-    if (runtime.store.config.axiomIngestEnabled) runtime.axiomPoller?.start()
-    if (process.env.FOMO_INGEST !== "false" && Boolean(process.env.FOMO_API_KEY?.trim())) {
-      runtime.fomoPoller?.start()
-    }
-  }
   return runtime
+}
+
+function standDown(runtime: Runtime) {
+  runtime.engine.stop()
+  runtime.pumpPoller.stop()
+  runtime.axiomPoller?.stop()
+  runtime.fomoPoller?.stop()
+  runtime.migrationMonitor.stop()
+}
+
+/** Adopt the Redis generation. A copy that already ran an older one drops its memory. */
+async function syncEpoch(runtime: Runtime) {
+  const epoch = await readEpoch()
+  const local = localEpochNow()
+  if (epoch === local) return
+  const hadHistory =
+    runtime.store.listAudits().length > 0 ||
+    runtime.collector.all().length > 0 ||
+    Boolean(runtime.store.lastSnapshotAt)
+  const stale = local !== 0 || hadHistory
+  noteEpoch(epoch)
+  if (!stale) return
+  standDown(runtime)
+  runtime.engine.discardStaleBoard()
+  runtime.collector.clear()
+  runtime.store.resetHistoryForMint()
+  runtime.store.log("info", `Generation ${epoch} — dropped this copy's old history`)
 }
 
 export async function waitForRuntime(): Promise<Runtime> {
   const runtime = getRuntime()
   if (globalRef.__calloutHydrate) await globalRef.__calloutHydrate
+  await followDurableMint(runtime)
+  await syncEpoch(runtime)
+  if (!runtime.store.config.coinMint) {
+    runtime.store.schedulerPaused = true
+    runtime.store.nextSnapshotAt = null
+    standDown(runtime)
+    runtime.store.emitState()
+    return runtime
+  }
+  const leader = await claimLeadership()
+  if (runtime.store.config.coinMint) await hydrateSnapshotLedger(runtime)
+  if (!leader) {
+    standDown(runtime)
+    return runtime
+  }
   await refreshLive(runtime)
+  scheduleCatchUp(runtime)
   return runtime
+}
+
+/**
+ * Run a due snapshot after the HTTP response. Vercel freezes setTimeout when
+ * the isolate sleeps; `after()` keeps the work alive so the OPS countdown
+ * actually fires.
+ */
+function scheduleCatchUp(runtime: Runtime) {
+  const next = runtime.store.nextSnapshotAt ? Date.parse(runtime.store.nextSnapshotAt) : NaN
+  const dueIn = Number.isFinite(next) ? next - Date.now() : 0
+  // Don't spawn catch-up work on every OPS poll while the published
+  // countdown is still minutes away — that was re-arming 5-minute timers.
+  if (dueIn > 20_000) return
+  const run = () =>
+    runtime.engine.catchUp().catch((error) => {
+      runtime.store.log(
+        "error",
+        error instanceof Error ? error.message : "Scheduler catch-up failed",
+      )
+    })
+  try {
+    after(run)
+  } catch {
+    setTimeout(() => void run(), 0)
+  }
 }
 
 async function refreshLive(runtime: Runtime) {
@@ -362,6 +448,7 @@ async function refreshLive(runtime: Runtime) {
   }
   if (!runtime.store.migrationPaid) runtime.migrationMonitor.start()
   if (runtime.store.config.pumpIngestEnabled) {
+    runtime.pumpPoller.start()
     try {
       await runtime.pumpPoller.pollOnce()
     } catch (error) {
@@ -372,23 +459,172 @@ async function refreshLive(runtime: Runtime) {
     }
   }
   if (runtime.store.config.axiomIngestEnabled && runtime.axiomPoller) {
+    runtime.axiomPoller.start()
     try {
       await runtime.axiomPoller.pollOnce()
     } catch {
       /* status already recorded */
     }
   }
-  // FOMO: start timer only — never poll on every /api/state wake.
-  if (
-    runtime.fomoPoller &&
-    process.env.FOMO_INGEST !== "false" &&
-    Boolean(process.env.FOMO_API_KEY?.trim())
-  ) {
-    runtime.fomoPoller.start()
+  runtime.fomoPoller?.stop()
+  await runtime.engine.syncQualifiedBoard()
+  await touchLeaderWork()
+}
+
+/**
+ * Pull operational config from Redis and apply it to the in-memory store.
+ * Fields in durable config win over Vercel env var defaults; the admin UI
+ * sets both so they stay in sync. The treasury private key is stored
+ * AES-256-GCM encrypted (ADMIN_KEY is the KDF input).
+ */
+/** Redis mint wins over the Vercel env mint, so a start or stop reaches every isolate. */
+async function followDurableMint(runtime: Runtime) {
+  const cfg = await loadDurableConfig()
+  if (!cfg || !Object.prototype.hasOwnProperty.call(cfg, "coinMint")) return
+  const minted = typeof cfg.coinMint === "string" && isMintAddress(cfg.coinMint) ? cfg.coinMint : null
+  if (minted) applyLiveMint(runtime, minted, cfg.distributionToken ?? null, cfg.coinName ?? null)
+  else applyIdleMint(runtime)
+}
+
+function applyLiveMint(
+  runtime: Runtime,
+  mint: string,
+  ticker: string | null,
+  name: string | null,
+) {
+  if (runtime.store.config.coinMint === mint) return
+  process.env.CALLOUT_MINT = mint
+  if (ticker) {
+    process.env.CALLOUT_TOKEN = ticker
+    process.env.DISTRIBUTION_TOKEN = ticker
+  }
+  if (name) process.env.CALLOUT_NAME = name
+  runtime.store.config = {
+    ...runtime.store.config,
+    coinMint: mint,
+    coinName: name,
+    distributionToken: ticker || runtime.store.config.distributionToken,
+    pumpIngestEnabled: process.env.PUMP_INGEST !== "false",
+    axiomIngestEnabled:
+      Boolean(runtime.axiomPoller?.status().cookieConfigured) && process.env.AXIOM_INGEST !== "false",
+  }
+  runtime.store.pumpIngest.enabled = runtime.store.config.pumpIngestEnabled
+  if (runtime.store.axiomIngest) runtime.store.axiomIngest.enabled = runtime.store.config.axiomIngestEnabled
+  runtime.collector.clear()
+  runtime.pumpPoller.reset()
+  runtime.axiomPoller?.reset()
+  runtime.fomoPoller?.reset()
+  runtime.store.resetHistoryForMint()
+  runtime.store.log("info", `Live mint is ${ticker || mint}`)
+}
+
+function applyIdleMint(runtime: Runtime) {
+  delete process.env.CALLOUT_MINT
+  delete process.env.CALLOUT_TOKEN
+  delete process.env.CALLOUT_NAME
+  delete process.env.DISTRIBUTION_TOKEN
+  const hadMint = Boolean(runtime.store.config.coinMint)
+  runtime.store.config = {
+    ...runtime.store.config,
+    coinMint: null,
+    coinName: null,
+    distributionToken: "SHILL",
+    pumpIngestEnabled: false,
+    axiomIngestEnabled: false,
+  }
+  runtime.store.pumpIngest.enabled = false
+  if (runtime.store.axiomIngest) runtime.store.axiomIngest.enabled = false
+  runtime.store.schedulerPaused = true
+  runtime.store.nextSnapshotAt = null
+  if (!hadMint) return
+  runtime.pumpPoller.stop()
+  runtime.pumpPoller.reset()
+  runtime.axiomPoller?.stop()
+  runtime.axiomPoller?.reset()
+  runtime.fomoPoller?.stop()
+  runtime.fomoPoller?.reset()
+  runtime.migrationMonitor.stop()
+  runtime.collector.clear()
+  runtime.store.resetHistoryForMint()
+  runtime.store.schedulerPaused = true
+  runtime.store.nextSnapshotAt = null
+}
+
+async function applyDurableConfig(runtime: Runtime) {
+  const cfg = await loadDurableConfig()
+  if (!cfg) return
+
+  const patch: Partial<EngineConfig> = {}
+  if (cfg.fomoTreasuryWallet !== null && cfg.fomoTreasuryWallet !== undefined) {
+    patch.fomoTreasuryWallet = cfg.fomoTreasuryWallet
+  }
+  if (cfg.snapshotMinMs !== null && cfg.snapshotMinMs !== undefined) {
+    patch.snapshotMinMs = cfg.snapshotMinMs
+  }
+  if (cfg.snapshotMaxMs !== null && cfg.snapshotMaxMs !== undefined) {
+    patch.snapshotMaxMs = cfg.snapshotMaxMs
+  }
+  if (cfg.allocationAmount !== null && cfg.allocationAmount !== undefined) {
+    patch.allocationAmount = cfg.allocationAmount
+  }
+  if (cfg.creatorRewardShareBps !== null && cfg.creatorRewardShareBps !== undefined) {
+    patch.creatorRewardShareBps = cfg.creatorRewardShareBps
+  }
+  if (cfg.treasuryPublicAddress) {
+    patch.treasuryPublicAddress = cfg.treasuryPublicAddress
+  }
+  if (Object.prototype.hasOwnProperty.call(cfg, "coinMint")) {
+    const minted = typeof cfg.coinMint === "string" && isMintAddress(cfg.coinMint) ? cfg.coinMint : null
+    if (minted) {
+      applyLiveMint(runtime, minted, cfg.distributionToken ?? null, cfg.coinName ?? null)
+    } else {
+      applyIdleMint(runtime)
+    }
+  }
+
+  if (Object.keys(patch).length > 0) {
+    runtime.store.config = { ...runtime.store.config, ...patch }
+  }
+
+  // Decrypt and load treasury key if stored.
+  if (cfg.encryptedTreasuryKey) {
+    const adminKey = process.env.ADMIN_KEY?.trim()
+    if (adminKey) {
+      const raw = decryptTreasuryKey(cfg.encryptedTreasuryKey, adminKey)
+      if (raw) {
+        runtime.engine.setTreasuryPrivateKey(raw)
+        runtime.store.config = {
+          ...runtime.store.config,
+          treasuryPublicAddress: runtime.store.treasuryPublicAddress,
+        }
+      }
+    }
   }
 }
 
+function pinMatchesGeneration(pin: { generation?: number | null }): boolean {
+  const epoch = localEpochNow()
+  if (epoch <= 0) return true
+  return pin.generation === epoch
+}
+
+function isAfterWipe(iso: string | null | undefined, wipedAt: string | null | undefined): boolean {
+  if (!iso) return false
+  if (!wipedAt) return true
+  const t = Date.parse(iso)
+  const w = Date.parse(wipedAt)
+  return Number.isFinite(t) && Number.isFinite(w) && t > w
+}
+
 async function bootstrapRuntime(runtime: Runtime) {
+  // ── Durable config: load persisted operational settings from Redis ──
+  // This runs before pin hydration so every cold-start isolate picks up the
+  // latest fomoTreasuryWallet, snapshot timing, treasury key, etc. without
+  // requiring a Vercel redeploy.
+  await applyDurableConfig(runtime)
+  await syncEpoch(runtime)
+  const leader = await claimLeadership()
+
   if (!runtime.store.config.coinMint) {
     await hydrateWatchFromPin(runtime)
   }
@@ -398,7 +634,13 @@ async function bootstrapRuntime(runtime: Runtime) {
     runtime.store.schedulerPaused = true
     runtime.store.nextSnapshotAt = null
     runtime.store.log("info", "Waiting for SHILL tech — no mint configured.")
-    await runtime.engine.publishChannelIntro(true)
+    // Do not rewrite the pin here. Cold isolates with empty CALLOUT_MINT would
+    // stamp the waiting banner over a live mint. enterIdle() owns that publish.
+    runtime.store.emitState()
+    return
+  }
+  if (!leader) {
+    standDown(runtime)
     runtime.store.emitState()
     return
   }
@@ -426,18 +668,7 @@ async function bootstrapRuntime(runtime: Runtime) {
       /* status already recorded */
     }
   }
-  if (
-    runtime.fomoPoller &&
-    process.env.FOMO_INGEST !== "false" &&
-    Boolean(process.env.FOMO_API_KEY?.trim())
-  ) {
-    runtime.fomoPoller.start()
-    const f = runtime.fomoPoller.status()
-    runtime.store.log(
-      "info",
-      `[fomo] started (FOMO app WS feed) | accepted=${f.accepted} feed=${f.lastFeedCount} err=${f.lastError ?? "none"}`,
-    )
-  }
+  runtime.fomoPoller?.stop()
   restoreScheduler(runtime)
   const pinHasSchedule =
     ledger.sameMint &&
@@ -448,12 +679,17 @@ async function bootstrapRuntime(runtime: Runtime) {
     await runtime.engine.publishChannelIntro(false)
   }
   await runtime.engine.syncQualifiedBoard()
+  await touchLeaderWork()
   runtime.store.emitState()
 }
 
 async function hydrateSnapshotLedger(runtime: Runtime) {
   const mint = runtime.store.config.coinMint
   const persisted = await loadPersistedWatch(mint)
+  if (persisted?.wipedAt) {
+    runtime.store.dropHistoryAtOrBefore(persisted.wipedAt)
+    runtime.store.watchStartedAt = persisted.wipedAt
+  }
   if (persisted && persisted.mint === mint) {
     runtime.store.hydrateLedger(persisted.lastSnapshotAt ?? null, persisted.rounds ?? [])
     runtime.store.hydrateScheduler(
@@ -461,9 +697,10 @@ async function hydrateSnapshotLedger(runtime: Runtime) {
       persisted.schedulerPaused ? true : null,
     )
     runtime.store.hydrateMigration(persisted.migrationPaid === true)
+    if (persisted.migrationSawOpen) runtime.store.migrationSawOpen = true
     if (persisted.lifetimeCallouts?.length) {
       runtime.store.hydrateLifetimeCallouts(
-        expandCallouts(persisted.lifetimeCallouts, runtime.store.config.distributionToken),
+        expandCallouts(persisted.lifetimeCallouts, runtime.store.config.distributionToken, runtime.store.config.coinMint),
       )
     }
   }
@@ -475,40 +712,71 @@ async function hydrateSnapshotLedger(runtime: Runtime) {
     pin = await readQualifiedBoardFromPin(token, chatId)
     pinMint = await readMintFromPinnedIntro(token, chatId, mint)
     const sameMint = Boolean(mint && pinMint && pinMint === mint)
-    if (sameMint) {
+    if (sameMint && pin && pinMatchesGeneration(pin)) {
+      const wipe = persisted?.wipedAt ?? null
+      const pinLast = isAfterWipe(pin.lastSnapshotAt, wipe) ? pin.lastSnapshotAt : null
+      const pinRounds = (pin.rounds ?? []).filter((round) => isAfterWipe(round.at, wipe))
       // Redis/file rounds win; pin only fills gaps (often ≤1 round).
       if (!persisted?.rounds?.length) {
-        runtime.store.hydrateLedger(pin.lastSnapshotAt, pin.rounds)
-      } else if (pin.lastSnapshotAt) {
-        runtime.store.hydrateLedger(pin.lastSnapshotAt, [])
+        runtime.store.hydrateLedger(pinLast, pinRounds)
+      } else if (pinLast) {
+        runtime.store.hydrateLedger(pinLast, [])
       }
-      runtime.store.hydrateScheduler(pin.nextSnapshotAt, pin.schedulerPaused)
+      if (isAfterWipe(pin.nextSnapshotAt, wipe) || pin.schedulerPaused === true) {
+        runtime.store.hydrateScheduler(
+          isAfterWipe(pin.nextSnapshotAt, wipe) ? pin.nextSnapshotAt : null,
+          pin.schedulerPaused,
+        )
+      }
       runtime.store.hydrateMigration(pin.migrationPaid)
-    } else {
+    } else if (!sameMint) {
       notePinMintMismatch(runtime, pinMint, mint)
+    }
+  }
+  if (persisted?.wipedAt) {
+    runtime.store.dropHistoryAtOrBefore(persisted.wipedAt)
+    runtime.store.watchStartedAt = persisted.wipedAt
+    if (
+      runtime.store.nextSnapshotAt &&
+      !isAfterWipe(runtime.store.nextSnapshotAt, persisted.wipedAt)
+    ) {
+      runtime.store.nextSnapshotAt = null
     }
   }
   if (runtime.store.lastSnapshotAt) {
     runtime.collector.dropAtOrBefore(runtime.store.lastSnapshotAt)
   }
-  const windowStart = runtime.store.lastSnapshotAt ?? runtime.store.startedAt
+  const windowStart = runtime.store.windowStartIso()
   if (persisted && persisted.mint === mint) {
     hydrateCollectorCallouts(
       runtime.collector,
       runtime.store.config.distributionToken,
       persisted.callouts,
       windowStart,
+      mint,
     )
   }
-  if (pin && mint && pinMint === mint) {
+  if (pin && mint && pinMint === mint && pinMatchesGeneration(pin)) {
     hydrateCollectorCallouts(
       runtime.collector,
       runtime.store.config.distributionToken,
       pin.callouts,
       windowStart,
+      mint,
     )
   }
+  runtime.collector.dropMatching(
+    (row) => Boolean(row.mint && mint && row.mint !== mint) || (!row.mint && row.id.startsWith("fomo_family_")),
+  )
+  if (persisted?.wipedAt) runtime.collector.dropAtOrBefore(persisted.wipedAt)
+  dropDeadDeadline(runtime)
   return { pin, sameMint: Boolean(mint && pinMint && pinMint === mint) }
+}
+
+/** A deadline in the past is not a schedule. The leader arms a new 5–15 minute window. */
+function dropDeadDeadline(runtime: Runtime) {
+  const next = runtime.store.nextSnapshotAt ? Date.parse(runtime.store.nextSnapshotAt) : NaN
+  if (Number.isFinite(next) && next <= Date.now()) runtime.store.nextSnapshotAt = null
 }
 
 function hydrateCollectorCallouts(
@@ -516,22 +784,25 @@ function hydrateCollectorCallouts(
   token: string,
   rows: PersistedCaller[] | undefined,
   windowStartIso: string,
+  mint?: string | null,
 ) {
   if (!rows?.length) return
-  collector.merge(expandCallouts(rows, token), new Date(windowStartIso))
+  collector.merge(expandCallouts(rows, token, mint), new Date(windowStartIso))
 }
 
 function restoreScheduler(runtime: Runtime) {
   if (runtime.store.snapshotInProgress) return
+  if (!runtime.store.config.coinMint || !runtime.store.treasuryKeyConfigured) return
   if (runtime.store.schedulerPaused) {
     runtime.engine.pause()
     return
   }
+  dropDeadDeadline(runtime)
   if (runtime.store.nextSnapshotAt) {
     runtime.engine.restoreDeadline(runtime.store.nextSnapshotAt)
     return
   }
-  runtime.engine.ensureArmed()
+  runtime.engine.rearmScheduler()
 }
 
 async function hydrateWatchFromPin(runtime: Runtime) {
@@ -577,14 +848,15 @@ export async function setWatchMint(rawMint: string): Promise<void> {
   }
 
   const runtime = await waitForRuntime()
-  const current = runtime.store.config.coinMint
-  if (current === mint) {
-    runtime.store.log("info", `[wallet] Already watching mint ${mint}`)
-    return
+  if (!runtime.store.treasuryKeyConfigured) {
+    throw new Error("Set the treasury private key before starting a mint. Start is mint + treasury, then Pump, FOMO, and payouts arm together.")
   }
-
-  // Wipe the previous mint's durable ledger so hydrate cannot resurrect rounds/bonding.
-  if (current) await clearPersistedWatch(current)
+  const current = runtime.store.config.coinMint
+  const wipedAt = new Date().toISOString()
+  // Bump before any clear so other copies cannot write the old ledger back.
+  await bumpEpoch({ mints: [current, mint] })
+  await claimLeadership()
+  if (current && current !== mint) await clearPersistedWatch(current)
 
   const meta = await fetchCoinMetadata(mint)
   process.env.CALLOUT_MINT = mint
@@ -611,6 +883,14 @@ export async function setWatchMint(rawMint: string): Promise<void> {
     lastSnapshotAt: null,
     nextSnapshotAt: null,
     migrationPaid: false,
+    migrationSawOpen: false,
+    schedulerPaused: false,
+    wipedAt,
+  })
+  await saveDurableConfig({
+    coinMint: mint,
+    coinName: meta.name,
+    distributionToken: meta.ticker,
   })
 
   const fromIdle = !current
@@ -650,9 +930,34 @@ export async function setWatchMint(rawMint: string): Promise<void> {
   runtime.store.pumpIngest.enabled = runtime.store.config.pumpIngestEnabled
   runtime.store.axiomIngest.enabled = runtime.store.config.axiomIngestEnabled
   runtime.store.axiomIngest.cookieConfigured = axiomReady
+  let alreadyBonded = false
+  try {
+    alreadyBonded = (await fetchCoinBondingStatus(mint)).migrated
+  } catch (error) {
+    runtime.store.log(
+      "warn",
+      `[wallet] Bonding check failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  if (alreadyBonded) {
+    runtime.store.migrationBonded = true
+    runtime.store.migrationPaid = true
+    runtime.store.migrationSawOpen = false
+    await persistWatch({
+      mint,
+      ticker: meta.ticker,
+      name: meta.name,
+      migrationPaid: true,
+      migrationSawOpen: false,
+      wipedAt,
+    })
+    runtime.store.log("info", "Already bonded — lottery settled without a channel post")
+  }
+  runtime.engine.rearmScheduler()
+  await runtime.engine.publishChannelIntro(true)
   runtime.store.log(
     "info",
-    `[wallet] Mint set → ${meta.ticker} (${mint}) | pump=${runtime.store.config.pumpIngestEnabled} | axiom=${runtime.store.config.axiomIngestEnabled} | fomo=${process.env.FOMO_INGEST !== "false" && Boolean(process.env.FOMO_API_KEY?.trim())}`,
+    `[wallet] Mint set → ${meta.ticker} (${mint}) | pump=${runtime.store.config.pumpIngestEnabled} | axiom=${runtime.store.config.axiomIngestEnabled} | fomo=window`,
   )
   if (!axiomReady) {
     runtime.store.log(
@@ -663,7 +968,7 @@ export async function setWatchMint(rawMint: string): Promise<void> {
   runtime.store.log(
     "info",
     fromIdle
-      ? `[wallet] Mint launched → ${meta.ticker} (${mint}) | pump=${runtime.store.config.pumpIngestEnabled} | axiom=${runtime.store.config.axiomIngestEnabled} | fomo=${process.env.FOMO_INGEST !== "false" && Boolean(process.env.FOMO_API_KEY?.trim())}`
+      ? `[wallet] Mint launched → ${meta.ticker} (${mint}) | pump=${runtime.store.config.pumpIngestEnabled} | axiom=${runtime.store.config.axiomIngestEnabled} | fomo=window`
       : "Mint changed — Telegram channel and round history wiped.",
   )
   runtime.pumpPoller.start()
@@ -684,17 +989,8 @@ export async function setWatchMint(rawMint: string): Promise<void> {
     runtime.axiomPoller.start()
     void runtime.axiomPoller.pollOnce()
   }
-  if (
-    runtime.fomoPoller &&
-    process.env.FOMO_INGEST !== "false" &&
-    Boolean(process.env.FOMO_API_KEY?.trim())
-  ) {
-    runtime.fomoPoller.start()
-    void runtime.fomoPoller.pollOnce()
-  }
+  runtime.fomoPoller?.stop()
   runtime.migrationMonitor.start()
-  // resetHistoryForMint cleared nextSnapshotAt — arm a fresh countdown.
-  runtime.engine.rearmScheduler()
   await runtime.engine.syncQualifiedBoard()
   runtime.store.emitState()
 }
@@ -703,6 +999,8 @@ export async function clearWatchMint(): Promise<void> {
   const runtime = await waitForRuntime()
   const abandoned = runtime.store.config.coinMint
   const hadMint = Boolean(abandoned)
+  await bumpEpoch({ mints: [abandoned] })
+  await claimLeadership()
   delete process.env.CALLOUT_MINT
   process.env.CALLOUT_TOKEN = "SHILL"
   process.env.DISTRIBUTION_TOKEN = "SHILL"
@@ -719,6 +1017,11 @@ export async function clearWatchMint(): Promise<void> {
   runtime.store.pumpIngest.enabled = false
   runtime.store.axiomIngest.enabled = false
   await clearPersistedWatch(abandoned)
+  await saveDurableConfig({
+    coinMint: null,
+    coinName: null,
+    distributionToken: "SHILL",
+  })
   runtime.pumpPoller.stop()
   runtime.pumpPoller.reset()
   runtime.axiomPoller?.stop()
@@ -753,17 +1056,32 @@ export async function restartWatchCycle() {
     runtime.axiomPoller.start()
     void runtime.axiomPoller.pollOnce()
   }
-  if (
-    runtime.fomoPoller &&
-    process.env.FOMO_INGEST !== "false" &&
-    Boolean(process.env.FOMO_API_KEY?.trim())
-  ) {
-    runtime.fomoPoller.start()
-    void runtime.fomoPoller.pollOnce()
-  }
+  runtime.fomoPoller?.stop()
   runtime.engine.rearmScheduler()
   await runtime.engine.syncQualifiedBoard()
   runtime.store.emitState()
+}
+
+/**
+ * Persist the current operational config to Redis so all future cold-start
+ * isolates pick it up without a redeploy. Call this after any admin change to
+ * fomoTreasuryWallet, snapshotMinMs/Max, allocationAmount, or treasury key.
+ */
+export async function persistDurableConfig(
+  runtime: Runtime,
+  opts: { encryptedKey?: string | null } = {},
+): Promise<void> {
+  const cfg = runtime.store.config
+  await saveDurableConfig({
+    fomoTreasuryWallet: cfg.fomoTreasuryWallet,
+    treasuryPublicAddress: runtime.store.treasuryPublicAddress || cfg.treasuryPublicAddress || null,
+    snapshotMinMs: cfg.snapshotMinMs,
+    snapshotMaxMs: cfg.snapshotMaxMs,
+    allocationAmount: cfg.allocationAmount,
+    creatorRewardShareBps: cfg.creatorRewardShareBps,
+    // Only update the key field if explicitly provided; undefined = keep existing.
+    ...(opts.encryptedKey !== undefined ? { encryptedTreasuryKey: opts.encryptedKey } : {}),
+  })
 }
 
 /** Write-only Axiom session cookie. Never echoed in client state. */

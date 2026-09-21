@@ -69,6 +69,8 @@ const INGEST =
   process.env.CALLOUT_INGEST_URL?.trim() ||
   "https://callout-beta.vercel.app/api/ingest/callout"
 const ADMIN = process.env.ADMIN_KEY?.trim() || ""
+/** When a FOMO user hasn't linked a wallet, fall back to this address so they still enter the draw. */
+const FOMO_TREASURY_WALLET = process.env.FOMO_TREASURY_WALLET?.trim() || ""
 const API_BASE = (process.env.FOMO_FAMILY_API_BASE || "https://prod-api.fomo.family").replace(
   /\/$/,
   "",
@@ -178,17 +180,21 @@ async function ensureFreshPrivyToken(page = null) {
   return result.access
 }
 
-async function fetchLastSnapshotAt() {
+async function fetchLiveWatch() {
   try {
     const res = await fetch(`${INGEST.replace(/\/api\/ingest\/callout$/, "")}/api/public/state`, {
       headers: { "Cache-Control": "no-store" },
     })
-    if (!res.ok) return null
+    if (!res.ok) return { lastSnapshotAt: null, mint: null }
     const json = await res.json()
     const at = json?.engine?.lastSnapshotAt
-    return typeof at === "string" && Number.isFinite(Date.parse(at)) ? at : null
+    const mint = typeof json?.mint?.address === "string" ? json.mint.address.trim() : null
+    return {
+      lastSnapshotAt: typeof at === "string" && Number.isFinite(Date.parse(at)) ? at : null,
+      mint,
+    }
   } catch {
-    return null
+    return { lastSnapshotAt: null, mint: null }
   }
 }
 
@@ -212,6 +218,7 @@ async function ingest(row, handle, wallet, lastSnapshotAt) {
       thesis: row.thesis,
       id: `fomo_family_${row.id}`,
       capturedAt,
+      mint: MINT,
     }),
   })
   const text = await res.text()
@@ -367,7 +374,11 @@ async function syncTokenToPage(page, token) {
 async function pollOnce(page) {
   const token = await ensureFreshPrivyToken(page)
   await syncTokenToPage(page, token)
-  const lastSnapshotAt = await fetchLastSnapshotAt()
+  const live = await fetchLiveWatch()
+  if (live.mint && live.mint !== MINT) {
+    throw new Error(`watcher mint ${MINT} ≠ live watch ${live.mint} — refusing to ingest`)
+  }
+  const lastSnapshotAt = live.lastSnapshotAt
 
   // Prefer thesis feed; fall back to trades→comments.
   const feedUrl =
@@ -390,8 +401,13 @@ async function pollOnce(page) {
         handle = handle !== "fomo_user" ? handle : (detail?.handle || handle).replace(/^@/, "")
       }
       if (!wallet) {
-        console.warn(`[skip] no wallet @${handle} id=${row.id}`)
-        continue
+        if (FOMO_TREASURY_WALLET) {
+          wallet = FOMO_TREASURY_WALLET
+          console.warn(`[fomo-treasury] no wallet @${handle} id=${row.id} — using FOMO treasury wallet as placeholder`)
+        } else {
+          console.warn(`[skip] no wallet @${handle} id=${row.id}`)
+          continue
+        }
       }
       const status = await ingest(row, handle, wallet, lastSnapshotAt)
       if (status === 200 || status === 409) accepted += 1
@@ -445,8 +461,13 @@ async function pollOnce(page) {
       const handle = (row.handle || detail.handle || t.handle || "fomo_user").replace(/^@/, "")
       const wallet = detail.wallet || t.userAddress || ""
       if (!wallet) {
-        console.warn(`[skip] no wallet @${handle}`)
-        continue
+        if (FOMO_TREASURY_WALLET) {
+          wallet = FOMO_TREASURY_WALLET
+          console.warn(`[fomo-treasury] no wallet @${handle} — using FOMO treasury wallet as placeholder`)
+        } else {
+          console.warn(`[skip] no wallet @${handle}`)
+          continue
+        }
       }
       const st = await ingest(row, handle, wallet, lastSnapshotAt)
       if (st === 200 || st === 409) accepted += 1

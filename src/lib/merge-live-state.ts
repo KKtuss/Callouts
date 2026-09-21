@@ -138,7 +138,11 @@ export function mergeClientState(prev: ClientState | null, next: ClientState): C
           (a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt),
         ) as Callout[])
   const windowCount = callouts.filter((row) =>
-    isCalloutInCurrentWindow(row.capturedAt, next.status.lastSnapshotAt, next.status.startedAt),
+    isCalloutInCurrentWindow(
+      row.capturedAt,
+      next.status.lastSnapshotAt,
+      next.status.migration?.watchStartedAt ?? next.status.startedAt,
+    ),
   ).length
   const audits = pickAudits(prev.audits, next.audits)
 

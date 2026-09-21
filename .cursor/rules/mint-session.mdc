@@ -1,0 +1,26 @@
+---
+description: How a live mint session starts, runs, and returns to idle
+alwaysApply: true
+---
+
+# Mint session
+
+Production is https://www.shilltech.xyz. Do not run the engine locally. One Telegram bot and one Upstash Redis are shared by every Vercel isolate.
+
+## Idle
+
+No mint means paused, no snapshot timer, Pump off, and no FOMO window. Production has no `CALLOUT_MINT` and no `TREASURY_PRIVATE_KEY`. The key is pasted in OPS and stored encrypted. Start only when both are saved together. A mint alone must not start. Clearing the mint wipes callouts, audits, the Telegram channel, and the pin. Also stop `scripts/watch-fomo-browser.mjs` or it keeps posting.
+
+## Start
+
+Admin `POST /api/admin/config` applies `treasuryPrivateKey` before `coinMint`. That wipes, arms a random 5–15 minute snapshot (`SNAPSHOT_MIN_MS` 300000, `SNAPSHOT_MAX_MS` 900000, counted from when the timer is armed), and starts Pump plus migration. Durable `coinMint` in Redis wins over `CALLOUT_MINT`. Already-bonded mints stay quiet.
+
+## FOMO
+
+Do not call fomoapi. Theses come from an opened fomo.family window for the live mint only:
+
+`scripts/watch-fomo-browser.mjs` with `CALLOUT_MINT` set to that mint and `CALLOUT_INGEST_URL=https://www.shilltech.xyz/api/ingest/callout`. Visible Chrome, not headless. It must refuse to post if the live mint differs. Ingest requires `body.mint` to match the watch.
+
+## Check
+
+OPS countdown is on `/api/state`. Public live board is `/api/public/state`. QUALIFIED is posted when callers are in the window, before the snapshot. Empty windows do not post QUALIFIED.

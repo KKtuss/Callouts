@@ -1,8 +1,9 @@
 import { DuplicateCalloutError, isDuplicateCalloutError } from "@/engine/collector"
 import { requireAdmin } from "@/lib/admin-auth"
-import { getRuntime } from "@/engine/runtime"
+import { waitForRuntime } from "@/engine/runtime"
 
 export const dynamic = "force-dynamic"
+export const maxDuration = 300
 
 const ALLOW_ORIGINS = new Set([
   "https://fomo.family",
@@ -43,6 +44,7 @@ export async function POST(request: Request) {
 
   const body = (await request.json()) as {
     token?: string
+    mint?: string
     callerUsername?: string
     wallet?: string
     source?: string
@@ -53,8 +55,24 @@ export async function POST(request: Request) {
   }
 
   try {
-    const callout = getRuntime().engine.ingestCallout({
+    const runtime = await waitForRuntime()
+    const watchMint = runtime.store.config.coinMint
+    if (!watchMint) {
+      return withCors(request, Response.json({ error: "No mint is being watched" }, { status: 409 }))
+    }
+    const mint = typeof body.mint === "string" ? body.mint.trim() : ""
+    if (!mint) {
+      return withCors(request, Response.json({ error: "mint is required" }, { status: 400 }))
+    }
+    if (mint !== watchMint) {
+      return withCors(
+        request,
+        Response.json({ error: "Callout mint does not match the watched coin" }, { status: 409 }),
+      )
+    }
+    const callout = runtime.engine.ingestCallout({
       token: body.token,
+      mint,
       callerUsername: body.callerUsername ?? "",
       wallet: body.wallet ?? "",
       source: body.source,
@@ -63,7 +81,8 @@ export async function POST(request: Request) {
       thesis: body.thesis,
       silent: body.silent,
     })
-    return withCors(request, Response.json({ callout, state: getRuntime().store.clientState() }))
+    if (!body.silent) await runtime.engine.flushQualifiedNotices()
+    return withCors(request, Response.json({ callout, state: runtime.store.clientState() }))
   } catch (error) {
     if (isDuplicateCalloutError(error)) {
       return withCors(

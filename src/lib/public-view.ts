@@ -286,7 +286,11 @@ export function toPublicView(state: ClientState): PublicView {
 
   const windowCallouts = state.callouts
     .filter((c) =>
-      isCalloutInCurrentWindow(c.capturedAt, state.status.lastSnapshotAt, state.status.startedAt),
+      isCalloutInCurrentWindow(
+        c.capturedAt,
+        state.status.lastSnapshotAt,
+        state.status.migration?.watchStartedAt ?? state.status.startedAt,
+      ),
     )
     .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt))
     .map((c) => mapCallout(c, addressTemplate))
@@ -322,7 +326,7 @@ export function toPublicView(state: ClientState): PublicView {
       paused: state.status.schedulerPaused,
       phase: state.status.phase,
       snapshotInProgress: state.status.snapshotInProgress,
-      startedAt: state.status.startedAt,
+      startedAt: state.status.migration?.watchStartedAt ?? state.status.startedAt,
       lastSnapshotAt: state.status.lastSnapshotAt,
       nextSnapshotRangeLabel: state.status.nextSnapshotRangeLabel,
       calloutsInWindow: state.status.calloutsInWindow,

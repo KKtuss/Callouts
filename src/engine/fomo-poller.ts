@@ -28,6 +28,7 @@ type IngestFn = (input: {
   id?: string
   thesis?: string
   silent?: boolean
+  mint?: string
 }) => Callout
 
 const MIN_POLL_MS = 20_000
@@ -173,10 +174,13 @@ export class FomoThesesPoller {
       if (this.seenIds.has(row.thesisId) || this.unresolvedIds.has(row.thesisId)) continue
       if (row.createdAtMs > now + 60_000) continue
 
-      const wallet = await this.walletFor(row, now)
+      const resolvedWallet = await this.walletFor(row, now)
+      const fomoFallback = cfg.fomoTreasuryWallet ?? null
+      const wallet = resolvedWallet ?? fomoFallback
       if (!wallet) {
         this.unresolvedIds.add(row.thesisId)
         this.unresolved += 1
+        this.lastError = `No wallet for @${row.traderHandle}`
         continue
       }
 
@@ -189,6 +193,7 @@ export class FomoThesesPoller {
           capturedAt: new Date(row.createdAtMs).toISOString(),
           id: `fomo_${row.thesisId}`,
           thesis: row.thesis,
+          mint,
         })
         this.seenIds.add(row.thesisId)
         if (row.createdAtMs >= windowStartMs) this.accepted += 1

@@ -96,8 +96,8 @@ export function parseFomoThesis(raw: unknown, preferMint?: string | null): FomoT
     asString(row.trader) ??
     asString(row.userHandle) ??
     asString(row.handle)
-  const createdAtMs = createdAtMsFrom(row)
-  if (!traderHandle || createdAtMs === null) return null
+  const createdAtMs = createdAtMsFrom(row) ?? Date.now()
+  if (!traderHandle) return null
 
   const handle = displayUsername(traderHandle).replace(/^@/, "")
   const rawText =
@@ -234,8 +234,9 @@ export async function drainFomoThesisAlerts(input: {
   WebSocketImpl?: typeof WebSocket
 }): Promise<FomoThesisRecord[]> {
   const WebSocketImpl = input.WebSocketImpl ?? WebSocket
-  const timeoutMs = input.timeoutMs ?? 8_000
-  const quietMs = input.quietMs ?? 1_200
+  const timeoutMs = input.timeoutMs ?? 15_000
+  const quietMs = input.quietMs ?? 2_500
+  const idleMs = Math.min(timeoutMs, Math.max(quietMs * 2, 6_000))
     const url = fomoAlertsWsUrl({
       apiKey: input.apiKey,
       // Pass the token address so FOMO's server pre-filters; client also filters as a guard.
@@ -247,12 +248,14 @@ export async function drainFomoThesisAlerts(input: {
     const byId = new Map<string, FomoThesisRecord>()
     let settled = false
     let quietTimer: ReturnType<typeof setTimeout> | null = null
+    let idleTimer: ReturnType<typeof setTimeout> | null = null
     let ws: WebSocket
 
     const finish = () => {
       if (settled) return
       settled = true
       if (quietTimer) clearTimeout(quietTimer)
+      if (idleTimer) clearTimeout(idleTimer)
       clearTimeout(hardTimer)
       try {
         ws.close()
@@ -265,16 +268,22 @@ export async function drainFomoThesisAlerts(input: {
     }
 
     const bumpQuiet = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer)
+        idleTimer = null
+      }
       if (quietTimer) clearTimeout(quietTimer)
       quietTimer = setTimeout(finish, quietMs)
     }
 
     const hardTimer = setTimeout(finish, timeoutMs)
+    idleTimer = setTimeout(finish, idleMs)
 
     try {
       ws = new WebSocketImpl(url)
     } catch (error) {
       clearTimeout(hardTimer)
+      if (idleTimer) clearTimeout(idleTimer)
       reject(error)
       return
     }
@@ -288,22 +297,15 @@ export async function drainFomoThesisAlerts(input: {
       }
       const row = asRecord(payload)
       if (!row) return
-      if (asString(row.type) === "welcome") {
-        bumpQuiet()
-        return
-      }
-      if (asString(row.type) === "heartbeat") {
-        bumpQuiet()
+      if (asString(row.type) === "welcome" || asString(row.type) === "heartbeat") {
         return
       }
       if (asString(row.type) !== "alert") return
 
       // When the WS is already filtered by token, events may omit the tokenAddress field.
       // Parse without preferMint guard; the server-side filter is our primary defence.
-      const parsed = parseFomoThesis(row)
-      if (parsed && (!parsed.tokenAddress || parsed.tokenAddress === input.tokenAddress)) {
-        // Stamp the known mint if the event omitted it
-        if (!parsed.tokenAddress) parsed.tokenAddress = input.tokenAddress
+      const parsed = parseFomoThesis(row, input.tokenAddress)
+      if (parsed) {
         byId.set(parsed.thesisId, parsed)
       }
       bumpQuiet()

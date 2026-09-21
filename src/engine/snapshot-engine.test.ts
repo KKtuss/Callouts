@@ -79,6 +79,18 @@ class RecordingBroadcast implements Broadcast {
   }
 }
 
+const WATCH_MINT = "BKfdpRHgMUnZiLzBQjts6XimqrRedZVvxEjFttsHpump"
+
+function watching(extra: Partial<typeof DEFAULT_CONFIG> = {}) {
+  return {
+    ...DEFAULT_CONFIG,
+    coinMint: WATCH_MINT,
+    startupSnapshotDelayMs: null,
+    feederEnabled: false,
+    ...extra,
+  }
+}
+
 function clock(): Clock {
   let t = Date.parse("2026-09-19T17:13:00.000Z")
   return {
@@ -241,7 +253,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     const store = new EngineStore(
       () => collector.all(),
       () => broadcast.getMessages(),
-      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      watching(),
       "2026-09-19T17:00:00.000Z",
     )
     const engine = new SnapshotEngine(
@@ -268,6 +280,15 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       source: "private-ingest",
     })
     expect(accepted.token).toBe("$BONK")
+
+    expect(() =>
+      engine.ingestCallout({
+        callerUsername: "beta",
+        wallet: "8yKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        source: "fomo",
+        mint: "So11111111111111111111111111111111111111112",
+      }),
+    ).toThrow(/does not match the watched coin/i)
   })
 
   it("ignores other-coin callouts already sitting in the collector", async () => {
@@ -433,7 +454,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     const store = new EngineStore(
       () => collector.all(),
       () => broadcast.getMessages(),
-      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      watching(),
       "2026-09-19T17:00:00.000Z",
     )
     const engine = new SnapshotEngine(
@@ -490,13 +511,48 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     expect(broadcast.getMessages().filter((item) => item.kind === "qualified")).toHaveLength(1)
   })
 
+  it("does not post QUALIFIED while idle with no mint", async () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      { ...DEFAULT_CONFIG, coinMint: null, startupSnapshotDelayMs: null, feederEnabled: false },
+      "2026-09-19T17:00:00.000Z",
+    )
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+    engine.ingestCallout({
+      callerUsername: "alpha",
+      wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      source: "private-ingest",
+      capturedAt: "2026-09-19T17:01:00.000Z",
+    })
+    await engine.flushQualifiedNotices()
+    engine.ingestCallout({
+      callerUsername: "beta",
+      wallet: "8yKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      source: "private-ingest",
+      capturedAt: "2026-09-19T17:02:00.000Z",
+    })
+    await engine.flushQualifiedNotices()
+    expect(broadcast.sequence.filter((item) => item.kind === "qualified")).toHaveLength(0)
+    expect(collector.all()).toHaveLength(2)
+  })
+
   it("does not delete QUALIFIED when this isolate has no window callouts yet", async () => {
     const collector = new CalloutCollector()
     const broadcast = new RecordingBroadcast()
     const store = new EngineStore(
       () => collector.all(),
       () => broadcast.getMessages(),
-      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      watching(),
       "2026-09-19T17:00:00.000Z",
     )
     const engine = new SnapshotEngine(
@@ -528,7 +584,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     const store = new EngineStore(
       () => collector.all(),
       () => broadcast.getMessages(),
-      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      watching(),
       "2026-09-19T17:00:00.000Z",
     )
     const originalSend = broadcast.send.bind(broadcast)
@@ -575,7 +631,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     const store = new EngineStore(
       () => collector.all(),
       () => broadcast.getMessages(),
-      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      watching(),
       "2026-09-19T17:00:00.000Z",
     )
     const engine = new SnapshotEngine(
@@ -629,7 +685,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       const store = new EngineStore(
         () => collector.all(),
         () => broadcast.getMessages(),
-        { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+        watching(),
         "2026-09-19T17:00:00.000Z",
       )
       const engine = new SnapshotEngine(
@@ -710,7 +766,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       const store = new EngineStore(
         () => collector.all(),
         () => broadcast.getMessages(),
-        { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+        watching(),
         "2026-09-19T17:00:00.000Z",
       )
       const engine = new SnapshotEngine(
@@ -790,7 +846,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     engine.stop()
   })
 
-  it("launches from idle without purging Telegram history", async () => {
+  it("launches from idle and purges leftover QUALIFIED posts", async () => {
     const collector = new CalloutCollector()
     const broadcast = new RecordingBroadcast()
     const store = new EngineStore(
@@ -815,7 +871,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       coinName: "TEST",
     }
     await engine.launchFromIdle()
-    expect(broadcast.sequence.some((item) => item.text.startsWith("purge="))).toBe(false)
+    expect(broadcast.sequence.some((item) => item.text === "purge=500")).toBe(true)
     const intros = broadcast.sequence.filter((item) => item.kind === "intro")
     expect(intros.at(-1)?.text).toContain("Mint:")
     expect(intros.at(-1)?.text).toContain("BKfd")
@@ -895,7 +951,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     const store = new EngineStore(
       () => collector.all(),
       () => broadcast.getMessages(),
-      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      watching(),
       "2026-09-19T17:00:00.000Z",
     )
     store.lastSnapshotAt = "2026-09-19T17:13:00.000Z"
@@ -932,6 +988,106 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     store.nextSnapshotAt = null
     store.hydrateScheduler(past, null)
     expect(store.nextSnapshotAt).toBeNull()
+    store.lastSnapshotAt = null
+    store.hydrateScheduler(past, null)
+    expect(store.nextSnapshotAt).toBeNull()
+  })
+
+  it("skips a scheduler snapshot inside the 5 minute minimum window", async () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      watching(),
+      "2026-09-19T17:00:00.000Z",
+    )
+    store.lastSnapshotAt = "2026-09-19T17:10:00.000Z"
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+    const skipped = await engine.runSnapshot("scheduler")
+    expect(skipped).toBeNull()
+    expect(broadcast.sequence).toHaveLength(0)
+    const next = store.nextSnapshotAt ? Date.parse(store.nextSnapshotAt) : NaN
+    expect(next - Date.parse("2026-09-19T17:13:00.000Z")).toBeGreaterThan(60_000)
+    engine.stop()
+  })
+
+  it("does not fire an overdue pin deadline 2s after a recent snapshot", () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      watching(),
+      "2026-09-19T17:00:00.000Z",
+    )
+    store.lastSnapshotAt = "2026-09-19T17:10:00.000Z"
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+    engine.restoreDeadline("2026-09-19T17:12:50.000Z")
+    const next = store.nextSnapshotAt ? Date.parse(store.nextSnapshotAt) : NaN
+    expect(next - Date.parse("2026-09-19T17:13:00.000Z")).toBeGreaterThan(60_000)
+    engine.stop()
+  })
+
+  it("keeps an overdue deadline after min-gap so catchUp can fire it", () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      watching(),
+      "2026-09-19T17:00:00.000Z",
+    )
+    store.lastSnapshotAt = "2026-09-19T17:07:00.000Z"
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+    engine.restoreDeadline("2026-09-19T17:12:00.000Z")
+    expect(store.nextSnapshotAt).toBe("2026-09-19T17:12:00.000Z")
+    engine.stop()
+  })
+
+  it("catchUp fires an overdue deadline once the 5 minute gap has elapsed", async () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      watching(),
+      "2026-09-19T17:00:00.000Z",
+    )
+    store.lastSnapshotAt = "2026-09-19T17:07:00.000Z"
+    store.nextSnapshotAt = "2026-09-19T17:12:00.000Z"
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+    const audit = await engine.catchUp()
+    expect(audit?.confirmationStatus).toBe("skipped")
+    engine.stop()
   })
 
   it("does not QUALIFIED-publish callers at or before the pin snapshot time", async () => {
@@ -980,7 +1136,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       const store = new EngineStore(
         () => collector.all(),
         () => broadcast.getMessages(),
-        { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+        watching(),
         "2026-09-19T17:00:00.000Z",
       )
       const engine = new SnapshotEngine(
@@ -1034,7 +1190,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       const store = new EngineStore(
         () => collector.all(),
         () => broadcast.getMessages(),
-        { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+        watching(),
         "2026-09-19T17:00:00.000Z",
       )
       store.lastSnapshotAt = snap
@@ -1079,7 +1235,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     const store = new EngineStore(
       () => collector.all(),
       () => broadcast.getMessages(),
-      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      watching(),
       "2026-09-19T17:00:00.000Z",
     )
     const engine = new SnapshotEngine(
@@ -1126,7 +1282,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
     const store = new EngineStore(
       () => collector.all(),
       () => broadcast.getMessages(),
-      { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+      watching(),
       "2026-09-19T17:00:00.000Z",
     )
     const engine = new SnapshotEngine(
@@ -1188,7 +1344,7 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       const store = new EngineStore(
         () => collector.all(),
         () => broadcast.getMessages(),
-        { ...DEFAULT_CONFIG, startupSnapshotDelayMs: null, feederEnabled: false },
+        watching(),
         "2026-09-19T17:00:00.000Z",
       )
       store.lastSnapshotAt = snap
@@ -1223,5 +1379,36 @@ describe("SnapshotEngine broadcast lifecycle", () => {
       if (prevChat === undefined) delete process.env.TELEGRAM_CHANNEL_ID
       else process.env.TELEGRAM_CHANNEL_ID = prevChat
     }
+  })
+
+  it("keeps the live window at wipe time when a later isolate boots", () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(
+      () => collector.all(),
+      () => broadcast.getMessages(),
+      watching(),
+      "2026-09-21T19:24:26.000Z",
+    )
+    store.watchStartedAt = "2026-09-21T18:00:00.000Z"
+    expect(store.windowStartIso()).toBe("2026-09-21T18:00:00.000Z")
+
+    const engine = new SnapshotEngine(
+      store,
+      collector,
+      new MockTreasury(() => store.config, async () => undefined),
+      broadcast,
+      clock(),
+      new ScriptedRandom([]),
+    )
+    const accepted = engine.ingestCallout({
+      callerUsername: "alpha",
+      wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      source: "pump-fun",
+      capturedAt: "2026-09-21T18:30:00.000Z",
+      silent: true,
+    })
+    expect(accepted.capturedAt).toBe("2026-09-21T18:30:00.000Z")
+    expect(store.status().calloutsInWindow).toBe(1)
   })
 })

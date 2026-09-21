@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState, useSyncExternalStore } from "react"
-import { Camera, Pause, Play } from "lucide-react"
+import { Camera, Square } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -132,7 +132,11 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
 
   const live = [...state.callouts].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))
   const windowed = live.filter((callout) =>
-    isCalloutInCurrentWindow(callout.capturedAt, state.status.lastSnapshotAt, state.status.startedAt),
+    isCalloutInCurrentWindow(
+      callout.capturedAt,
+      state.status.lastSnapshotAt,
+      state.status.migration.watchStartedAt ?? state.status.startedAt,
+    ),
   )
   const token = displayToken(state.status.config.distributionToken)
   const selectedAudit =
@@ -194,16 +198,21 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
         >
           Check bonding
         </Button>
-        {state.status.schedulerPaused ? (
-          <Button variant="outline" onClick={() => run("resume", () => post("/api/admin/resume"))}>
-            <Play data-icon="inline-start" />
-            Resume
+        {state.status.config.coinMint ? (
+          <Button
+            variant="outline"
+            onClick={() =>
+              run("stop", () => post("/api/admin/config", { coinMint: null }))
+            }
+            disabled={Boolean(busy)}
+          >
+            <Square data-icon="inline-start" />
+            Stop and wipe
           </Button>
         ) : (
-          <Button variant="outline" onClick={() => run("pause", () => post("/api/admin/pause"))}>
-            <Pause data-icon="inline-start" />
-            Pause
-          </Button>
+          <p className="self-center text-xs text-white/45">
+            Set the mint and treasury key in Settings to start. That wipes the channel and arms Pump, FOMO, and payouts for that mint only.
+          </p>
         )}
         <p className="self-center text-xs text-white/40">
           {windowed.length} eligible this window · {state.status.migration.eligibleCount} migration-ready
@@ -249,7 +258,7 @@ export function OpsApp({ initialState }: { initialState: ClientState | null }) {
                       inWindow={isCalloutInCurrentWindow(
                         callout.capturedAt,
                         state.status.lastSnapshotAt,
-                        state.status.startedAt,
+                        state.status.migration.watchStartedAt ?? state.status.startedAt,
                       )}
                     />
                   ))}

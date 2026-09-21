@@ -18,6 +18,7 @@ import {
   migrationSkipped,
   migrationWinner,
 } from "@/telegram/messages"
+import { claimBondAnnouncement } from "@/engine/watch-kv"
 
 export class MigrationMonitor {
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -87,6 +88,10 @@ export class MigrationMonitor {
     this.applyBondProgress(status)
     this.store.migrationLastCheckAt = this.clock.now().toISOString()
     if (!status.migrated) {
+      if (!this.store.migrationSawOpen) {
+        this.store.migrationSawOpen = true
+        await this.persistQuietly()
+      }
       this.store.emitState()
       return null
     }
@@ -94,6 +99,29 @@ export class MigrationMonitor {
     this.store.migrationBonded = true
     if (this.store.migrationPaid) {
       this.store.emitState()
+      return null
+    }
+
+    // Already bonded when this watch started. Settle without a channel post.
+    if (!this.store.migrationSawOpen) {
+      this.store.migrationPaid = true
+      this.store.log("info", "Already bonded when this watch started — lottery stays quiet")
+      this.store.emitState()
+      await this.persistQuietly()
+      return null
+    }
+
+    const claimed = await claimBondAnnouncement(mint)
+    if (claimed === "unavailable") {
+      this.store.log("warn", "Bond lottery deferred — could not claim the announcement")
+      this.store.emitState()
+      return null
+    }
+    if (claimed === "taken") {
+      this.store.migrationPaid = true
+      this.store.log("info", "Bond lottery already announced by the live copy")
+      this.store.emitState()
+      await this.persistQuietly()
       return null
     }
 
@@ -216,18 +244,27 @@ export class MigrationMonitor {
       }),
     )
 
-    const pendingTxs = audit.winners.map((row) =>
-      txPending({
+    const fomoTreasury = this.store.config.fomoTreasuryWallet
+    const pendingTxs = audit.winners.map((row) => {
+      const candidate = selection.winners.find((w) => w.wallet === row.wallet)
+      const isFomo = candidate?.callouts.some((c) => c.source === "fomo") ?? false
+      const destWallet = isFomo && fomoTreasury ? fomoTreasury : row.wallet
+      if (isFomo && fomoTreasury) {
+        this.store.log(
+          "info",
+          `[fomo-treasury] Bond lottery winner @${row.callerUsername} → FOMO treasury ${fomoTreasury.slice(0, 8)}… (manual distribution)`,
+        )
+      }
+      return txPending({
         kind: "migration_bonus",
-        calloutId:
-          selection.winners.find((w) => w.wallet === row.wallet)?.callouts.at(-1)?.id ?? row.wallet,
+        calloutId: candidate?.callouts.at(-1)?.id ?? row.wallet,
         token: cfg.distributionToken,
         callerUsername: row.callerUsername,
-        wallet: row.wallet,
+        wallet: destWallet,
         amount: row.amount,
         distributionToken: cfg.distributionToken,
-      }),
-    )
+      })
+    })
     audit.transactions = pendingTxs
     audit.transaction = pendingTxs[0] ?? null
     this.store.upsertMigration(audit)

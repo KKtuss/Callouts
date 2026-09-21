@@ -32,6 +32,7 @@ type IngestFn = (input: {
   id?: string
   thesis?: string
   silent?: boolean
+  mint?: string
 }) => Callout
 
 function fetchInit(): RequestInit {
@@ -58,7 +59,7 @@ export class PumpCalloutPoller {
   private seenIds = new Set<string>()
   private windowKey = ""
   private needsBackfill = true
-  private polling = false
+  private inFlight: Promise<PumpCalloutRecord[]> | null = null
   connected = false
   lastPollAt: string | null = null
   lastError: string | null = null
@@ -115,13 +116,11 @@ export class PumpCalloutPoller {
   }
 
   async pollOnce(now = Date.now()): Promise<PumpCalloutRecord[]> {
-    if (this.polling) return []
-    this.polling = true
-    try {
-      return await this.pollOnceNow(now)
-    } finally {
-      this.polling = false
-    }
+    if (this.inFlight) return this.inFlight
+    this.inFlight = this.pollOnceNow(now).finally(() => {
+      this.inFlight = null
+    })
+    return this.inFlight
   }
 
   private async pollOnceNow(now: number): Promise<PumpCalloutRecord[]> {
@@ -161,6 +160,7 @@ export class PumpCalloutPoller {
           id: `pump_${row.activityId}`,
           thesis: row.thesis,
           silent: true,
+          mint,
         })
         changed = true
         this.seenIds.add(row.activityId)

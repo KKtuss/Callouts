@@ -277,6 +277,7 @@ async function ingest(row, handle, wallet) {
       thesis: row.thesis,
       id: `fomo_family_${row.id}`,
       capturedAt: row.createdAt,
+      mint: MINT,
     }),
   })
   const text = await res.text()

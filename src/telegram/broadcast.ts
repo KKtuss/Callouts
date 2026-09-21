@@ -439,12 +439,24 @@ export class TelegramBroadcast implements Broadcast {
       return
     }
 
+    // Collect ids to delete (skip protected/pinned).
+    const ids: number[] = []
     for (let id = tip; id > tip - limit && id > 0; id -= 1) {
-      if (this.protectedIds.has(id)) continue
+      if (!this.protectedIds.has(id)) ids.push(id)
+    }
+
+    // Batch-delete in chunks of 100 (Telegram deleteMessages, Bot API 6.8+).
+    // Falls back to serial deleteMessage if the batch call fails.
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100)
       try {
-        await this.api("deleteMessage", { chat_id: this.chatId, message_id: id })
+        await this.api("deleteMessages", { chat_id: this.chatId, message_ids: chunk })
       } catch {
-        /* not ours / already deleted / too old */
+        for (const id of chunk) {
+          try {
+            await this.api("deleteMessage", { chat_id: this.chatId, message_id: id })
+          } catch { /* not ours / already deleted / too old */ }
+        }
       }
     }
   }

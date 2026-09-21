@@ -47,6 +47,7 @@ Mint: <a href="https://solscan.io/account/${test}">7hD7…pump</a>`
       rounds: [],
       migrationPaid: null,
       callouts: [],
+      generation: null,
     })
     expect(parseQualifiedBoardRef("https://callout-beta.vercel.app/")).toEqual({
       qualifiedTelegramId: null,
@@ -60,6 +61,7 @@ Mint: <a href="https://solscan.io/account/${test}">7hD7…pump</a>`
       rounds: [],
       migrationPaid: null,
       callouts: [],
+      generation: null,
     })
   })
 
@@ -262,5 +264,102 @@ Mint: <a href="https://solscan.io/account/${test}">7hD7…pump</a>`
     expect(next.lifetimeCallouts?.map((row) => row.i).sort()).toEqual(["fomo_family_1", "pump_1"])
     // Window callouts older than the new snapshot cursor are pruned.
     expect(next.callouts).toEqual([])
+  })
+
+  it("a later write cannot restore history from before a mint wipe", () => {
+    const mint = AIDEN_MINT
+    const wipedAt = "2026-09-21T18:00:00.000Z"
+    const previous = {
+      mint,
+      ticker: "T",
+      name: null,
+      lastSnapshotAt: "2026-09-21T17:00:00.000Z",
+      nextSnapshotAt: "2026-09-21T17:12:00.000Z",
+      rounds: [
+        {
+          id: "old",
+          at: "2026-09-21T17:00:00.000Z",
+          n: 1,
+          s: "confirmed" as const,
+          a: 1,
+          tok: "T",
+        },
+      ],
+      callouts: [
+        { i: "c1", u: "@a", w: "11111111111111111111111111111111", t: "2026-09-21T16:00:00.000Z" },
+      ],
+      lifetimeCallouts: [
+        { i: "c1", u: "@a", w: "11111111111111111111111111111111", t: "2026-09-21T16:00:00.000Z" },
+      ],
+    }
+    const wiped = mergePersistedWatch(
+      {
+        mint,
+        ticker: "T",
+        name: null,
+        wipedAt,
+        rounds: [],
+        callouts: [],
+        lifetimeCallouts: [],
+        lastSnapshotAt: null,
+      },
+      previous,
+    )
+    expect(wiped.wipedAt).toBe(wipedAt)
+    expect(wiped.rounds).toEqual([])
+    expect(wiped.callouts).toEqual([])
+    expect(wiped.lifetimeCallouts).toEqual([])
+    expect(wiped.lastSnapshotAt).toBeNull()
+    expect(wiped.nextSnapshotAt).toBeNull()
+
+    const resurrected = mergePersistedWatch(
+      {
+        mint,
+        ticker: "T",
+        name: null,
+        lastSnapshotAt: "2026-09-21T17:00:00.000Z",
+        rounds: previous.rounds,
+        callouts: previous.callouts,
+        lifetimeCallouts: previous.lifetimeCallouts,
+      },
+      wiped,
+    )
+    expect(resurrected.rounds).toEqual([])
+    expect(resurrected.callouts).toEqual([])
+    expect(resurrected.lifetimeCallouts).toEqual([])
+    expect(resurrected.lastSnapshotAt).toBeNull()
+    expect(resurrected.nextSnapshotAt).toBeNull()
+    expect(resurrected.wipedAt).toBe(wipedAt)
+  })
+
+  it("drops unminted FOMO-family injects that belong to another coin", () => {
+    const mint = AIDEN_MINT
+    const merged = mergePersistedWatch(
+      {
+        mint,
+        ticker: "AIDEN",
+        name: null,
+        wipedAt: "2026-09-21T18:00:00.000Z",
+        callouts: [
+          {
+            i: "fomo_family_suicat",
+            u: "@x",
+            w: "11111111111111111111111111111111",
+            t: "2026-09-21T19:00:00.000Z",
+            s: "fomo",
+          },
+          {
+            i: "pump_ok",
+            u: "@y",
+            w: "22222222222222222222222222222222",
+            t: "2026-09-21T19:01:00.000Z",
+            s: "pump-fun",
+            m: mint,
+          },
+        ],
+      },
+      null,
+    )
+    expect(merged.callouts?.map((row) => row.i)).toEqual(["pump_ok"])
   })
 })

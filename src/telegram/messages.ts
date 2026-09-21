@@ -13,7 +13,10 @@ import {
   truncateSig,
   truncateWallet,
 } from "@/lib/format"
+import { PRE_BOND_FOMO_NOTICE } from "@/lib/notices"
 import type { Callout, ChannelMessageKind, DistributionTx } from "@/engine/types"
+
+export { PRE_BOND_FOMO_NOTICE }
 
 export type FormattedMessage = {
   kind: ChannelMessageKind
@@ -54,9 +57,14 @@ export function channelIntro(input: {
   telegramUrl?: string | null
   xUrl?: string | null
   pumpUrl?: string | null
+  /** Pump curve still open — pin the FOMO wallet notice. */
+  preBond?: boolean
+  /** Drop the manifesto so the FOMO notice still fits a photo caption. */
+  compact?: boolean
 }): FormattedMessage {
   const mintShort = input.mint ? truncateWallet(input.mint, 4, 4) : null
   const waiting = !input.mint
+  const preBondNotice = !waiting && input.preBond ? PRE_BOND_FOMO_NOTICE : null
 
   const links: { label: string; href: string }[] = []
   if (input.siteUrl) {
@@ -75,13 +83,17 @@ export function channelIntro(input: {
     }
   }
 
-  const bodyText = waiting
-    ? WAITING_FOR_SHILL
-    : [
-        "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
-        "",
-        `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
-      ].join("\n")
+  const manifesto = [
+    "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
+    "",
+    `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
+  ]
+  const liveBody = [
+    ...(input.compact ? [] : manifesto),
+    ...(input.compact || !preBondNotice ? [] : [""]),
+    ...(preBondNotice ? [preBondNotice] : []),
+  ].join("\n")
+  const bodyText = waiting ? WAITING_FOR_SHILL : liveBody
 
   const text = [
     "SHILL",
@@ -107,13 +119,19 @@ export function channelIntro(input: {
     ...(waiting
       ? [escapeHtml(WAITING_FOR_SHILL)]
       : [
-          escapeHtml(
-            "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
-          ),
-          "",
-          escapeHtml(
-            `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
-          ),
+          ...(input.compact
+            ? []
+            : [
+                escapeHtml(
+                  "In a world where nothing matters more than being heard, why should the loud voices get nothing?",
+                ),
+                "",
+                escapeHtml(
+                  `SHILL reads the Pump.fun callout section, takes random snapshots, and pays the wallets doing the talking. Automatically, on-chain, every ${input.windowLabel}.`,
+                ),
+              ]),
+          ...(input.compact || !preBondNotice ? [] : [""]),
+          ...(preBondNotice ? [escapeHtml(preBondNotice)] : []),
         ]),
     "",
     DIVIDER,
@@ -557,6 +575,20 @@ export function withBondProgress(
     ...message,
     text: `${message.text}\n\n${bar} ${status} · ${fill}`,
     html: `${message.html}\n\n${code(bar)} ${bold(status)} · ${escapeHtml(fill)}`,
+  }
+}
+
+/** FOMO wallet instruction — on every channel post while the mint is pre-bond. */
+export function withPreBondFomoNotice(
+  message: FormattedMessage,
+  preBond: boolean | null | undefined,
+): FormattedMessage {
+  if (!preBond) return message
+  if (message.text.includes(PRE_BOND_FOMO_NOTICE)) return message
+  return {
+    ...message,
+    text: `${message.text}\n\n${PRE_BOND_FOMO_NOTICE}`,
+    html: `${message.html}\n\n${escapeHtml(PRE_BOND_FOMO_NOTICE)}`,
   }
 }
 

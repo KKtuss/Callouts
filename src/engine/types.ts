@@ -6,6 +6,8 @@ export type Callout = {
   capturedAt: string
   source: string
   thesis?: string
+  /** Source mint. Required for external ingest; pollers stamp the watched mint. */
+  mint?: string
 }
 
 export type SelectionMethod = "node:crypto.randomInt"
@@ -138,6 +140,12 @@ export type EngineConfig = {
   migrationPollMs: number
   /** Share of claimed creator fees paid out each post-bond snapshot (basis points). */
   creatorRewardShareBps: number
+  /**
+   * Secondary treasury wallet controlled by the admin for FOMO winner payouts.
+   * When set, all FOMO-source winner payouts are routed here instead of directly
+   * to the winner's wallet, so the admin can distribute manually via the FOMO app.
+   */
+  fomoTreasuryWallet: string | null
 }
 
 export type MigrationAudit = {

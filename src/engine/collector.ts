@@ -56,6 +56,7 @@ export function normalizeCallout(input: {
   capturedAt?: string
   id?: string
   thesis?: string
+  mint?: string
 }): Callout {
   if (!isValidToken(input.token)) {
     throw new Error("Invalid callout token")
@@ -78,6 +79,7 @@ export function normalizeCallout(input: {
     capturedAt: input.capturedAt ?? new Date().toISOString(),
     source: input.source.trim(),
     thesis: input.thesis?.trim() || undefined,
+    mint: input.mint?.trim() || undefined,
   }
 }
 
@@ -158,6 +160,7 @@ export class CalloutCollector {
           capturedAt: row.capturedAt,
           id: row.id,
           thesis: row.thesis,
+          mint: row.mint,
         },
         windowStart,
       )
@@ -167,6 +170,10 @@ export class CalloutCollector {
   /** Drop settled-window rows after a snapshot clock is restored on a new isolate. */
   dropAtOrBefore(iso: string) {
     this.callouts = this.callouts.filter((callout) => callout.capturedAt > iso)
+  }
+
+  dropMatching(predicate: (callout: Callout) => boolean) {
+    this.callouts = this.callouts.filter((callout) => !predicate(callout))
   }
 
   clear() {

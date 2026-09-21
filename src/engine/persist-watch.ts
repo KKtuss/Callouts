@@ -3,7 +3,7 @@ import { gunzipSync, gzipSync } from "node:zlib"
 import path from "node:path"
 import { isMintAddress } from "@/lib/coin"
 import { explorerTxUrl } from "@/lib/explorer"
-import { deleteWatch, loadWatch, saveWatch } from "@/engine/watch-kv"
+import { clearSnapshotWindow, deleteWatch, loadWatch, saveWatch } from "@/engine/watch-kv"
 import type { Callout, DistributionTx, SnapshotAudit, TxStatus } from "@/engine/types"
 
 export type PersistedPayout = {
@@ -34,6 +34,8 @@ export type PersistedCaller = {
   w: string
   t: string
   s?: string
+  /** Source mint. Legacy FOMO-family rows without this are untrusted. */
+  m?: string
 }
 
 export type PersistedWatch = {
@@ -47,10 +49,14 @@ export type PersistedWatch = {
   schedulerPaused?: boolean
   rounds?: PersistedRound[]
   migrationPaid?: boolean
+  /** This generation has observed the curve still filling. */
+  migrationSawOpen?: boolean
   /** Current snapshot window only (QUALIFIED board hydrate). */
   callouts?: PersistedCaller[]
   /** Accepted callouts since this mint watch started — bonding eligibility. */
   lifetimeCallouts?: PersistedCaller[]
+  /** History at or before this instant is dead. A stale isolate cannot merge it back. */
+  wipedAt?: string | null
 }
 
 const MAX_PERSISTED_ROUNDS = 50
@@ -69,6 +75,7 @@ export type PinBoardRef = {
   rounds: PersistedRound[]
   migrationPaid: boolean | null
   callouts: PersistedCaller[]
+  generation?: number | null
 }
 
 const PIN_CALLOUTS_MAX_CHARS = 1400
@@ -87,7 +94,7 @@ function persistEnabled() {
 function normalizeWatch(parsed: Partial<PersistedWatch>): PersistedWatch | null {
   const mint = typeof parsed.mint === "string" ? parsed.mint.trim() : ""
   if (!isMintAddress(mint)) return null
-  return {
+  return applyWipe({
     mint,
     ticker: typeof parsed.ticker === "string" && parsed.ticker.trim() ? parsed.ticker.trim() : "TOKEN",
     name: typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim() : null,
@@ -110,9 +117,14 @@ function normalizeWatch(parsed: Partial<PersistedWatch>): PersistedWatch | null 
     schedulerPaused: parsed.schedulerPaused === true,
     rounds: sanitizeRounds(parsed.rounds),
     migrationPaid: parsed.migrationPaid === true,
+    migrationSawOpen: parsed.migrationSawOpen === true,
     callouts: sanitizeCallers(parsed.callouts, MAX_WINDOW_CALLOUTS),
     lifetimeCallouts: sanitizeCallers(parsed.lifetimeCallouts, MAX_LIFETIME_CALLOUTS),
-  }
+    wipedAt:
+      typeof parsed.wipedAt === "string" && Number.isFinite(Date.parse(parsed.wipedAt))
+        ? parsed.wipedAt
+        : null,
+  })
 }
 
 function readWatchFile(): PersistedWatch | null {
@@ -160,9 +172,47 @@ export function mergePersistedWatch(
   return mergeWatch(watch, previous)
 }
 
+/** External FOMO-family rows without a mint stamp are not trusted for this watch. */
+export function callerBelongsToMint(row: PersistedCaller, mint: string | null | undefined): boolean {
+  if (row.m) return !mint || row.m === mint
+  if (row.i.startsWith("fomo_family_")) return false
+  return true
+}
+
+function laterIso(incoming?: string | null, previous?: string | null): string | null {
+  const a = incoming && Number.isFinite(Date.parse(incoming)) ? Date.parse(incoming) : NaN
+  const b = previous && Number.isFinite(Date.parse(previous)) ? Date.parse(previous) : NaN
+  if (!Number.isFinite(a)) return Number.isFinite(b) ? previous! : null
+  if (!Number.isFinite(b)) return incoming!
+  return a >= b ? incoming! : previous!
+}
+
+function applyWipe(watch: PersistedWatch): PersistedWatch {
+  const wipeMs = watch.wipedAt ? Date.parse(watch.wipedAt) : NaN
+  if (!Number.isFinite(wipeMs)) return watch
+  const after = (iso?: string | null) => {
+    const at = iso ? Date.parse(iso) : NaN
+    return Number.isFinite(at) && at > wipeMs
+  }
+  return {
+    ...watch,
+    lastSnapshotAt: after(watch.lastSnapshotAt) ? watch.lastSnapshotAt : null,
+    nextSnapshotAt: after(watch.nextSnapshotAt) ? watch.nextSnapshotAt : null,
+    rounds: (watch.rounds ?? []).filter((round) => after(round.at)),
+    callouts: (watch.callouts ?? []).filter((row) => after(row.t) && callerBelongsToMint(row, watch.mint)),
+    lifetimeCallouts: (watch.lifetimeCallouts ?? []).filter(
+      (row) => after(row.t) && callerBelongsToMint(row, watch.mint),
+    ),
+  }
+}
+
 function mergeWatch(watch: PersistedWatch, previous: PersistedWatch | null): PersistedWatch {
   const sameMint = previous?.mint === watch.mint
-  return {
+  const wipedAt = laterIso(
+    Object.prototype.hasOwnProperty.call(watch, "wipedAt") ? watch.wipedAt ?? null : null,
+    sameMint ? previous?.wipedAt ?? null : null,
+  )
+  return applyWipe({
     mint: watch.mint,
     ticker: watch.ticker,
     name: watch.name,
@@ -176,16 +226,14 @@ function mergeWatch(watch: PersistedWatch, previous: PersistedWatch | null): Per
       : sameMint
         ? previous?.qualifiedFingerprint ?? null
         : null,
-    lastSnapshotAt: Object.prototype.hasOwnProperty.call(watch, "lastSnapshotAt")
-      ? watch.lastSnapshotAt ?? null
-      : sameMint
-        ? previous?.lastSnapshotAt ?? null
-        : null,
-    nextSnapshotAt: Object.prototype.hasOwnProperty.call(watch, "nextSnapshotAt")
-      ? watch.nextSnapshotAt ?? null
-      : sameMint
-        ? previous?.nextSnapshotAt ?? null
-        : null,
+    lastSnapshotAt: laterIso(
+      Object.prototype.hasOwnProperty.call(watch, "lastSnapshotAt") ? watch.lastSnapshotAt : null,
+      sameMint ? previous?.lastSnapshotAt : null,
+    ),
+    nextSnapshotAt: laterIso(
+      Object.prototype.hasOwnProperty.call(watch, "nextSnapshotAt") ? watch.nextSnapshotAt : null,
+      sameMint && !watch.wipedAt ? previous?.nextSnapshotAt ?? null : null,
+    ),
     schedulerPaused: Object.prototype.hasOwnProperty.call(watch, "schedulerPaused")
       ? Boolean(watch.schedulerPaused)
       : sameMint
@@ -200,6 +248,11 @@ function mergeWatch(watch: PersistedWatch, previous: PersistedWatch | null): Per
       ? Boolean(watch.migrationPaid)
       : sameMint
         ? Boolean(previous?.migrationPaid)
+        : false,
+    migrationSawOpen: Object.prototype.hasOwnProperty.call(watch, "migrationSawOpen")
+      ? watch.migrationSawOpen === true
+      : sameMint
+        ? previous?.migrationSawOpen === true
         : false,
     callouts: Object.prototype.hasOwnProperty.call(watch, "callouts")
       ? pruneCalloutsBeforeSnapshot(
@@ -224,7 +277,8 @@ function mergeWatch(watch: PersistedWatch, previous: PersistedWatch | null): Per
       : sameMint
         ? previous?.lifetimeCallouts ?? []
         : [],
-  }
+    wipedAt,
+  })
 }
 
 /** Drop window callouts that already fell behind the snapshot cursor. */
@@ -282,7 +336,10 @@ export async function clearPersistedWatch(mint?: string | null): Promise<void> {
   const known = mint?.trim() || readWatchFile()?.mint || process.env.CALLOUT_MINT?.trim() || null
   delete process.env.CALLOUT_MINT
   if (!persistEnabled()) {
-    if (known) await deleteWatch(known)
+    if (known) {
+      await deleteWatch(known)
+      await clearSnapshotWindow(known)
+    }
     return
   }
   try {
@@ -291,7 +348,10 @@ export async function clearPersistedWatch(mint?: string | null): Promise<void> {
   } catch (error) {
     console.warn("[watch] failed to clear persisted mint", error)
   }
-  if (known) await deleteWatch(known)
+  if (known) {
+    await deleteWatch(known)
+    await clearSnapshotWindow(known)
+  }
 }
 
 const MINT_IN_URL =
@@ -335,6 +395,7 @@ export function parseQualifiedBoardRef(text: string | null | undefined): PinBoar
     rounds: [],
     migrationPaid: null,
     callouts: [],
+    generation: null,
   }
   if (!text) return empty
   const qids = parseQids(text.match(/[?#&]qid=([\d.]+)/i)?.[1] ?? null)
@@ -347,6 +408,7 @@ export function parseQualifiedBoardRef(text: string | null | undefined): PinBoar
   const sid = text.match(/[?#&]sid=([^&#]+)/i)?.[1] ?? null
   const pausedFlag = text.match(/[?#&]p=([01])/)?.[1] ?? null
   const migFlag = text.match(/[?#&]mig=([01])/)?.[1] ?? null
+  const genRaw = Number(text.match(/[?#&]gen=(\d+)/)?.[1] ?? "")
   const lastSnapshotAt = snap ? decodeURIComponent(snap) : null
   const snapshotClaimId = sid ? decodeURIComponent(sid) : null
   return {
@@ -362,6 +424,7 @@ export function parseQualifiedBoardRef(text: string | null | undefined): PinBoar
     rounds: encoded ? decodeRounds(encoded) : [],
     migrationPaid: migFlag === "1" ? true : migFlag === "0" ? false : null,
     callouts: packed ? decodeCallouts(packed) : [],
+    generation: Number.isFinite(genRaw) && genRaw > 0 ? genRaw : null,
   }
 }
 
@@ -399,6 +462,7 @@ export function siteUrlWithBoardRef(
     paused?: boolean | null
     paid?: boolean | null
     callouts?: PersistedCaller[]
+    gen?: number | null
   },
 ): string {
   const url = siteUrl.split("#")[0]
@@ -429,6 +493,7 @@ export function siteUrlWithBoardRef(
     nxt ? `nxt=${nxt}` : null,
     ref.paused === true ? "p=1" : ref.paused === false ? "p=0" : null,
     ref.paid === true ? "mig=1" : null,
+    ref.gen && ref.gen > 0 ? `gen=${Math.floor(ref.gen)}` : null,
   ]
     .filter(Boolean)
     .join("&")
@@ -514,6 +579,7 @@ export async function readQualifiedBoardFromPin(
     rounds: [],
     migrationPaid: null,
     callouts: [],
+    generation: null,
   }
   const pin = await fetchPinnedIntro(token, chatId)
   if (!pin) return merged
@@ -550,6 +616,9 @@ export async function readQualifiedBoardFromPin(
     }
     if (!merged.rounds.length && parsed.rounds.length) {
       merged.rounds = parsed.rounds
+    }
+    if (parsed.generation && parsed.generation > (merged.generation ?? 0)) {
+      merged.generation = parsed.generation
     }
     if (merged.migrationPaid !== true && parsed.migrationPaid === true) {
       merged.migrationPaid = true
@@ -834,15 +903,18 @@ export function mergeLifetimeCallouts(
     .slice(-MAX_LIFETIME_CALLOUTS)
 }
 
-export function expandCallouts(rows: PersistedCaller[], token: string): Callout[] {
-  return sanitizeCallers(rows).map((row) => ({
-    id: row.i,
-    token,
-    callerUsername: row.u.startsWith("@") ? row.u : `@${row.u}`,
-    wallet: row.w,
-    capturedAt: row.t,
-    source: row.s?.trim() || "pump-fun",
-  }))
+export function expandCallouts(rows: PersistedCaller[], token: string, mint?: string | null): Callout[] {
+  return sanitizeCallers(rows)
+    .filter((row) => callerBelongsToMint(row, mint ?? null))
+    .map((row) => ({
+      id: row.i,
+      token,
+      callerUsername: row.u.startsWith("@") ? row.u : `@${row.u}`,
+      wallet: row.w,
+      capturedAt: row.t,
+      source: row.s?.trim() || "pump-fun",
+      mint: row.m,
+    }))
 }
 
 function compactCaller(row: Callout): PersistedCaller | null {
@@ -854,6 +926,7 @@ function compactCaller(row: Callout): PersistedCaller | null {
     w: row.wallet.trim(),
     t: row.capturedAt,
     s: row.source?.trim() || undefined,
+    m: row.mint?.trim() || undefined,
   }
 }
 
@@ -883,6 +956,7 @@ function sanitizeCaller(value: unknown): PersistedCaller | null {
     w: parsed.w.trim(),
     t: parsed.t,
     s: typeof parsed.s === "string" && parsed.s.trim() ? parsed.s.trim() : undefined,
+    m: typeof parsed.m === "string" && parsed.m.trim() ? parsed.m.trim() : undefined,
   }
 }
 

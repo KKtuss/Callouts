@@ -2,9 +2,10 @@ import { waitForRuntime } from "@/engine/runtime"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
+export const maxDuration = 300
 
 export async function GET(request: Request) {
-  const { store } = await waitForRuntime()
+  const { store, engine } = await waitForRuntime()
   const encoder = new TextEncoder()
 
   const stream = new ReadableStream({
@@ -39,6 +40,7 @@ export async function GET(request: Request) {
 
       const keepalive = setInterval(() => {
         if (closed) return
+        void engine.catchUp().catch(() => undefined)
         try {
           controller.enqueue(encoder.encode(`: keepalive\n\n`))
         } catch {

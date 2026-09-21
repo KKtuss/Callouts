@@ -9,6 +9,7 @@ import { getClockSnapshot, getServerClockSnapshot, subscribeClock } from "@/lib/
 import { formatElapsed, formatInteger, formatSolAmount } from "@/lib/format"
 import { usePublicEngine } from "@/hooks/use-public-engine"
 import type { PublicRound, PublicView } from "@/lib/public-view"
+import { PRE_BOND_FOMO_NOTICE } from "@/lib/notices"
 import { WalletAddress } from "@/components/public/wallet-address"
 import { cn } from "@/lib/utils"
 
@@ -643,6 +644,16 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
             <div className="mt-10 sm:mt-12">
               <CounterBar state={state} />
             </div>
+            {mint && state && !state.bonding.bonded ? (
+              <aside
+                role="status"
+                className="hero-line aqua-panel mt-4 rounded-3xl px-5 py-4 text-left sm:mt-5 sm:px-8 sm:py-4"
+              >
+                <p className="text-[12px] leading-relaxed text-shill-deep/80 sm:text-sm">
+                  {PRE_BOND_FOMO_NOTICE}
+                </p>
+              </aside>
+            ) : null}
           </div>
         </section>
 

@@ -8,6 +8,8 @@ import {
   snapshotAnnouncement,
   snapshotPayout,
   withBondProgress,
+  withPreBondFomoNotice,
+  PRE_BOND_FOMO_NOTICE,
 } from "@/telegram/messages"
 import { progressBar } from "@/lib/format"
 import type { Callout, DistributionTx } from "@/engine/types"
@@ -166,6 +168,34 @@ describe("public Telegram surface", () => {
     expect(waiting.text).not.toContain("qid=")
     expect(waiting.html).toContain("https://callout-beta.vercel.app")
     expect(waiting.html).not.toContain("qid=801")
+    expect(waiting.text).not.toContain("pre-bond")
+  })
+
+  it("pins the FOMO wallet notice on a pre-bond intro", () => {
+    const intro = channelIntro({
+      tokenName: "SUI CAT",
+      ticker: "SUICAT",
+      mint: "AP5YnCZRFHayveJ1zSSWeGpB1Hps4v8pLJ6ASmXLMD6M",
+      windowLabel: "5–15 minutes",
+      siteUrl: "https://www.shilltech.xyz",
+      telegramUrl: "https://t.me/example",
+      pumpUrl: "https://pump.fun/coin/AP5YnCZRFHayveJ1zSSWeGpB1Hps4v8pLJ6ASmXLMD6M",
+      preBond: true,
+    })
+    expect(intro.text).toContain(PRE_BOND_FOMO_NOTICE)
+    expect(intro.text.indexOf("Mint:")).toBeGreaterThan(intro.text.indexOf("pre-bond"))
+    const compact = channelIntro({
+      tokenName: "SUI CAT",
+      ticker: "SUICAT",
+      mint: "AP5YnCZRFHayveJ1zSSWeGpB1Hps4v8pLJ6ASmXLMD6M",
+      windowLabel: "5–15 minutes",
+      siteUrl: "https://www.shilltech.xyz",
+      preBond: true,
+      compact: true,
+    })
+    expect(compact.text).toContain(PRE_BOND_FOMO_NOTICE)
+    expect(compact.text).not.toContain("In a world where nothing matters")
+    expect(compact.html.length).toBeLessThan(1024)
   })
 
   it("names the callout platform on the qualified board", () => {
@@ -232,5 +262,13 @@ describe("public Telegram surface", () => {
     expect(withBondProgress(base, { percent: 50, solRaised: 40, solTarget: 85, bonded: true }).text).toBe(
       base.text,
     )
+  })
+
+  it("appends the FOMO wallet notice only while pre-bond", () => {
+    const base = qualifiedCaller({ callouts: [callout] })
+    expect(withPreBondFomoNotice(base, false).text).toBe(base.text)
+    const noted = withPreBondFomoNotice(base, true)
+    expect(noted.text).toContain(PRE_BOND_FOMO_NOTICE)
+    expect(withPreBondFomoNotice(noted, true).text).toBe(noted.text)
   })
 })

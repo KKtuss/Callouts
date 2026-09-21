@@ -27,6 +27,7 @@ describe("MigrationMonitor", () => {
       mockTxDelayMs: 0,
     })
     store.watchStartedAt = "2026-09-19T16:00:00.000Z"
+    store.migrationSawOpen = true
     store.treasuryBalance = 1_000_000_000
 
     for (let i = 0; i < 3; i += 1) {
@@ -87,6 +88,7 @@ describe("MigrationMonitor", () => {
       mockTxDelayMs: 0,
     })
     store.watchStartedAt = "2026-09-19T16:00:00.000Z"
+    store.migrationSawOpen = true
     for (let i = 0; i < 3; i += 1) {
       collector.ingest({
         id: `a${i}`,
@@ -113,6 +115,47 @@ describe("MigrationMonitor", () => {
     expect(audit?.confirmationStatus).toBe("skipped")
     expect(audit?.skipReason).toMatch(/none still hold/i)
     expect(store.migrationPaid).toBe(true)
+  })
+
+  it("stays quiet when the coin is already bonded at the start of the watch", async () => {
+    const collector = new CalloutCollector()
+    const broadcast = new RecordingBroadcast()
+    const store = new EngineStore(() => collector.all(), () => broadcast.getMessages(), {
+      ...DEFAULT_CONFIG,
+      coinMint: AIDEN_MINT,
+      distributionToken: "AIDEN",
+      mockTxDelayMs: 0,
+    })
+    store.watchStartedAt = "2026-09-19T16:00:00.000Z"
+    for (let i = 0; i < 3; i += 1) {
+      collector.ingest({
+        id: `a${i}`,
+        token: "AIDEN",
+        callerUsername: "alpha",
+        wallet: walletA,
+        capturedAt: new Date(Date.parse("2026-09-19T16:10:00.000Z") + i * 60_000).toISOString(),
+        source: "pump-fun",
+      })
+    }
+    syncLifetime(store, collector)
+    const treasury = new MockTreasury(() => store.config, async () => undefined, 1_000_000_000)
+    const monitor = new MigrationMonitor(
+      store,
+      collector,
+      treasury,
+      { now: () => new Date("2026-09-19T18:00:00.000Z"), sleep: async () => undefined },
+      { int: () => 0, bytes: () => Buffer.alloc(32, 1) },
+      async () => true,
+      async () => new Response(JSON.stringify({ complete: true, symbol: "AIDEN" }), { status: 200 }),
+      broadcast,
+    )
+
+    expect(await monitor.pollOnce()).toBeNull()
+    expect(store.migrationPaid).toBe(true)
+    expect(store.migrationBonded).toBe(true)
+    expect(store.migrationSawOpen).toBe(false)
+    expect(broadcast.sequence).toHaveLength(0)
+    expect(treasury.balance).toBe(1_000_000_000)
   })
 
   it("tracks bonding progress without a dedicated bond channel message", async () => {

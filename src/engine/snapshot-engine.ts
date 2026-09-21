@@ -13,11 +13,24 @@ import {
   compactLifetimeCallouts,
   compactRound,
   expandCallouts,
+  loadPersistedWatch,
   persistWatch,
   readPersistedWatch,
   readQualifiedBoardFromPin,
   siteUrlWithBoardRef,
+  type PinBoardRef,
 } from "@/engine/persist-watch"
+import {
+  acquireSnapshotLock,
+  claimLeadership,
+  kvEnabled,
+  takeLeadership,
+  localEpochNow,
+  noteEpoch,
+  readEpoch,
+  releaseSnapshotLock,
+  reserveSnapshotWindow,
+} from "@/engine/watch-kv"
 import type {
   Callout,
   DistributionTx,
@@ -37,6 +50,7 @@ import {
   snapshotPayout,
   snapshotTaking,
   withBondProgress,
+  withPreBondFomoNotice,
   type BondSnippet,
   type FormattedMessage,
 } from "@/telegram/messages"
@@ -51,7 +65,6 @@ export const realClock: Clock = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }
 
-const SCHEDULER_DEBOUNCE_MS = 90_000
 const SNAPSHOT_CLAIM_TTL_MS = 180_000
 const SNAPSHOT_CLAIM_WAIT_MS = 700
 const QUALIFIED_CLAIM_WAIT_MS = 700
@@ -78,6 +91,11 @@ function uniqueWindowCallouts(callouts: Callout[]): Callout[] {
   return unique
 }
 
+function qualifiedEditTargetMissing(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /message to edit not found|message not found|MESSAGE_ID_INVALID|unknown channel message/i.test(message)
+}
+
 export class SnapshotEngine {
   private scheduler: ReturnType<typeof setTimeout> | null = null
   private firstSchedule = true
@@ -91,6 +109,7 @@ export class SnapshotEngine {
   private qualifiedCount = 0
   private qualifiedBoardChain: Promise<void> = Promise.resolve()
   private snapshotClaimId: string | null = null
+  private snapLockOwner: string | null = null
 
   constructor(
     private readonly store: EngineStore,
@@ -117,8 +136,23 @@ export class SnapshotEngine {
     }
   }
 
+  private isPreBond(): boolean {
+    return Boolean(this.config.coinMint) && !this.store.migrationBonded
+  }
+
+  /**
+   * For any FOMO-source callout, returns the configured FOMO treasury wallet
+   * (so the global treasury transfers funds there for manual distribution).
+   * Falls back to callout.wallet when no FOMO treasury is configured.
+   */
+  private fomoPayoutWallet(callout: Callout): string {
+    const fomoCfg = this.config.fomoTreasuryWallet
+    if (callout.source === "fomo" && fomoCfg) return fomoCfg
+    return callout.wallet
+  }
+
   private decorate(message: FormattedMessage): FormattedMessage {
-    return withBondProgress(message, this.bondSnippet())
+    return withPreBondFomoNotice(withBondProgress(message, this.bondSnippet()), this.isPreBond())
   }
 
   private send(message: FormattedMessage) {
@@ -179,14 +213,13 @@ export class SnapshotEngine {
 
   private hydrateQualifiedBoard() {
     const persisted = readPersistedWatch()
-    if (!persisted || persisted.mint !== this.config.coinMint) return
+    if (!persisted || persisted.mint !== this.config.coinMint || persisted.wipedAt) return
     if (!this.qualifiedTelegramId && persisted.qualifiedTelegramId) {
       this.rememberQualifiedTelegramId(persisted.qualifiedTelegramId)
     }
     if (!this.qualifiedFingerprint && persisted.qualifiedFingerprint) {
       this.qualifiedFingerprint = persisted.qualifiedFingerprint
     }
-    this.store.hydrateLedger(persisted.lastSnapshotAt ?? null, persisted.rounds ?? [])
     if (this.store.lastSnapshotAt) this.collector.dropAtOrBefore(this.store.lastSnapshotAt)
   }
 
@@ -211,9 +244,15 @@ export class SnapshotEngine {
     void this.flushSnapshotLedger()
   }
 
+  private async epochIsCurrent(): Promise<boolean> {
+    if (!kvEnabled()) return true
+    return (await readEpoch()) === localEpochNow()
+  }
+
   private async flushSnapshotLedger() {
     const mint = this.config.coinMint
     if (!mint) return
+    if (!(await this.epochIsCurrent())) return
     await persistWatch({
       mint,
       ticker: this.config.distributionToken,
@@ -231,6 +270,7 @@ export class SnapshotEngine {
         .slice(0, 50)
         .map(compactRound),
       migrationPaid: this.store.migrationPaid,
+      migrationSawOpen: this.store.migrationSawOpen,
       callouts: compactCallouts(this.windowEligible()),
       lifetimeCallouts: compactLifetimeCallouts(this.store.listLifetimeCallouts()),
     })
@@ -253,6 +293,7 @@ export class SnapshotEngine {
       snapshotClaimId: this.snapshotClaimId,
       paused: this.store.schedulerPaused,
       paid: this.store.migrationPaid,
+      gen: localEpochNow() > 0 ? localEpochNow() : null,
       callouts: compactCallouts(this.windowEligible()),
       rounds: this.store
         .listAudits()
@@ -268,7 +309,7 @@ export class SnapshotEngine {
 
   private windowEligible(): Callout[] {
     const lastSnapshotAt = this.store.lastSnapshotAt
-    const windowStart = new Date(lastSnapshotAt ?? this.store.startedAt)
+    const windowStart = new Date(this.store.windowStartIso())
     const rows = uniqueWindowCallouts(
       this.collector
         .captureWindow(windowStart, this.clock.now())
@@ -318,7 +359,20 @@ export class SnapshotEngine {
   }
 
   private async publishQualifiedBoardNow() {
+    if (!(await this.writesAllowed())) {
+      if (this.windowEligible().length > 0) {
+        this.store.log(
+          "warn",
+          `QUALIFIED skipped — lease denied, local generation ${localEpochNow()}`,
+        )
+      }
+      return
+    }
     if (this.store.snapshotInProgress) return
+    // Idle / no mint: collect callouts if they arrive, but never fire QUALIFIED
+    // or snapshots. Pin has no qid in waiting mode, so every isolate would
+    // otherwise send a new board.
+    if (!this.config.coinMint) return
     if (this.pinConfigured()) {
       await this.hydrateQualifiedBoardFromPin(true)
     }
@@ -375,6 +429,7 @@ export class SnapshotEngine {
     if (!token || !chatId) return
     if (fresh) clearPinCache()
     const pin = await readQualifiedBoardFromPin(token, chatId)
+    if (!this.pinIsCurrent(pin)) return
     if (pin.lastSnapshotAt || pin.rounds.length) {
       this.store.hydrateLedger(pin.lastSnapshotAt, pin.rounds)
     }
@@ -401,8 +456,8 @@ export class SnapshotEngine {
     }
     if (pinCalloutsAfterSnap.length) {
       this.collector.merge(
-        expandCallouts(pinCalloutsAfterSnap, this.config.distributionToken),
-        new Date(this.store.lastSnapshotAt ?? this.store.startedAt),
+        expandCallouts(pinCalloutsAfterSnap, this.config.distributionToken, this.config.coinMint),
+        new Date(this.store.windowStartIso()),
       )
     }
     for (const id of pin.qualifiedTelegramIds.length
@@ -479,14 +534,122 @@ export class SnapshotEngine {
     this.armScheduler(delayMs ?? this.randomDelay())
   }
 
-  /** After hydrate: keep a live future deadline, otherwise arm one. */
+  /** Keep a deadline this generation already published. Never roll a new one. */
   ensureArmed() {
     if (this.store.snapshotInProgress || this.store.schedulerPaused) return
-    if (this.scheduler && this.store.nextSnapshotAt) {
-      const next = Date.parse(this.store.nextSnapshotAt)
-      if (Number.isFinite(next) && next > this.clock.now().getTime()) return
+    const next = this.store.nextSnapshotAt ? Date.parse(this.store.nextSnapshotAt) : NaN
+    if (!Number.isFinite(next) || next <= this.clock.now().getTime()) return
+    this.restoreDeadline(this.store.nextSnapshotAt!)
+  }
+
+  /**
+   * Fire a scheduler snapshot if the published deadline is due. Used on every
+   * request (via after()) and by the cron tick so Vercel frozen timers still
+   * match the OPS countdown.
+   */
+  async catchUp(): Promise<SnapshotAudit | null> {
+    if (!(await this.writesAllowed())) return null
+    if (this.store.snapshotInProgress || this.store.schedulerPaused) return null
+    if (!this.config.coinMint) return null
+    if (this.pinConfigured()) {
+      const token = process.env.TELEGRAM_BOT_TOKEN?.trim()
+      const chatId = process.env.TELEGRAM_CHANNEL_ID?.trim()
+      if (token && chatId) {
+        clearPinCache()
+        const pin = await readQualifiedBoardFromPin(token, chatId)
+        this.adoptPublishedSchedule(pin)
+      }
     }
-    this.armScheduler(this.store.lastSnapshotAt ? this.randomDelay() : this.firstDelay())
+    const now = this.clock.now().getTime()
+    const last = this.store.lastSnapshotAt ? Date.parse(this.store.lastSnapshotAt) : 0
+    if (last && now - last < this.schedulerMinGapMs()) {
+      this.restoreDeadline(this.store.nextSnapshotAt ?? new Date(last + this.schedulerMinGapMs()).toISOString())
+      return null
+    }
+    const next = this.store.nextSnapshotAt ? Date.parse(this.store.nextSnapshotAt) : NaN
+    if (!Number.isFinite(next)) {
+      const mint = this.config.coinMint
+      const watch = mint ? await loadPersistedWatch(mint) : null
+      const published = watch?.nextSnapshotAt ? Date.parse(watch.nextSnapshotAt) : NaN
+      if (watch?.nextSnapshotAt && Number.isFinite(published) && published > now + 1_000) {
+        this.restoreDeadline(watch.nextSnapshotAt)
+      } else if (!this.store.schedulerPaused) {
+        this.rearmScheduler()
+      }
+      return null
+    }
+    if (next > now + 1_000) {
+      this.restoreDeadline(this.store.nextSnapshotAt!)
+      return null
+    }
+    try {
+      return await this.runSnapshot("scheduler")
+    } catch (error) {
+      this.store.log("error", error instanceof Error ? error.message : "Snapshot failed")
+      return null
+    }
+  }
+
+  /** This copy may snapshot, persist, and publish only while it holds the lease. */
+  private async writesAllowed(): Promise<boolean> {
+    if (!kvEnabled()) return true
+    const epoch = await readEpoch()
+    if (epoch !== localEpochNow()) return false
+    return claimLeadership()
+  }
+
+  private pinIsCurrent(pin: PinBoardRef): boolean {
+    const epoch = localEpochNow()
+    if (epoch <= 0) return true
+    return pin.generation === epoch
+  }
+
+  /** Copy a published future deadline. Never invent a shorter 5-minute timer. */
+  private adoptPublishedSchedule(pin: PinBoardRef) {
+    if (!this.pinIsCurrent(pin)) return
+    if (pin.schedulerPaused === true) {
+      this.store.hydrateScheduler(null, true)
+      return
+    }
+    const now = this.clock.now().getTime()
+    const published = pin.nextSnapshotAt ? Date.parse(pin.nextSnapshotAt) : NaN
+    if (Number.isFinite(published) && published > now + 1_000) {
+      this.restoreDeadline(pin.nextSnapshotAt!)
+    }
+  }
+
+  private async releaseSnapLock() {
+    const mint = this.config.coinMint
+    const owner = this.snapLockOwner
+    this.snapLockOwner = null
+    if (!mint || !owner) return
+    await releaseSnapshotLock(mint, owner)
+  }
+
+  /** Pull last/next from Redis, then the pin. Does not roll a new countdown. */
+  private async copyAuthoritativeSchedule() {
+    const mint = this.config.coinMint
+    if (mint) {
+      const watch = await loadPersistedWatch(mint)
+      if (watch?.lastSnapshotAt) {
+        this.store.hydrateLedger(watch.lastSnapshotAt, watch.rounds ?? [])
+      }
+      if (watch?.nextSnapshotAt) this.restoreDeadline(watch.nextSnapshotAt)
+    }
+    if (!this.pinConfigured()) return
+    const token = process.env.TELEGRAM_BOT_TOKEN?.trim()
+    const chatId = process.env.TELEGRAM_CHANNEL_ID?.trim()
+    if (!token || !chatId) return
+    clearPinCache()
+    this.adoptPublishedSchedule(await readQualifiedBoardFromPin(token, chatId))
+  }
+
+  private schedulerMinGapMs(): number {
+    return Math.max(this.config.snapshotMinMs, 5_000)
+  }
+
+  private msUntilSchedulerGap(lastMs: number, now: number): number {
+    return Math.max(this.schedulerMinGapMs() - (now - lastMs), 1_000)
   }
 
   /** Keep a deadline already published on the pin, instead of rolling a new window. */
@@ -496,12 +659,23 @@ export class SnapshotEngine {
     if (!Number.isFinite(target)) return
     const now = this.clock.now().getTime()
     const last = this.store.lastSnapshotAt ? Date.parse(this.store.lastSnapshotAt) : 0
+    const minGap = this.schedulerMinGapMs()
     if (last && target <= last + 2_000) return
-    if (last && now - last < SCHEDULER_DEBOUNCE_MS) return
+    if (last && target < last + minGap - 2_000) {
+      if (!this.scheduler || !this.store.nextSnapshotAt || Date.parse(this.store.nextSnapshotAt) <= now) {
+        this.armScheduler(this.msUntilSchedulerGap(last, now))
+      }
+      return
+    }
     const ms = target - now
     if (ms <= 1_000) {
-      if (this.scheduler) return
-      this.armScheduler(2_000)
+      if (this.scheduler && this.store.nextSnapshotAt && Date.parse(this.store.nextSnapshotAt) > now) {
+        return
+      }
+      // Overdue and min-gap already satisfied. Keep the published deadline so
+      // catchUp() can fire in this request — do not push a new 1s timeout that
+      // Vercel will freeze as soon as the HTTP response is sent.
+      this.store.nextSnapshotAt = iso
       return
     }
     const current = this.store.nextSnapshotAt ? Date.parse(this.store.nextSnapshotAt) : NaN
@@ -511,6 +685,25 @@ export class SnapshotEngine {
 
   /** Permanent pinned intro — survives mint resets. Idle (no mint) is the waiting banner. */
   async publishChannelIntro(createIfMissing = false) {
+    if (createIfMissing) {
+      await takeLeadership()
+      const epoch = await readEpoch()
+      if (epoch > 0) noteEpoch(epoch)
+    }
+    const allowed = await this.writesAllowed()
+    if (!allowed && !createIfMissing) {
+      this.store.log(
+        "warn",
+        `Skipped Telegram intro — lease denied, local generation ${localEpochNow()}`,
+      )
+      return
+    }
+    if (!allowed && createIfMissing) {
+      this.store.log(
+        "warn",
+        `Publishing Telegram intro after wipe without the lease, local generation ${localEpochNow()}`,
+      )
+    }
     const cfg = this.config
     const ticker = cfg.distributionToken || "SHILL"
     const mint = cfg.coinMint
@@ -532,7 +725,9 @@ export class SnapshotEngine {
       xUrl,
       pumpUrl: mint ? `https://pump.fun/coin/${mint}` : null,
     }
-    let message = channelIntro(payload)
+    const preBond = Boolean(mint && !this.store.migrationBonded)
+    const buildIntro = (compact: boolean) => channelIntro({ ...payload, preBond, compact })
+    let message = buildIntro(false)
     if (mint && message.html.length > 1024) {
       payload.siteUrl = siteUrlWithBoardRef(siteBase, {
         qid: this.qualifiedTelegramId,
@@ -544,8 +739,12 @@ export class SnapshotEngine {
         snapshotClaimId: this.snapshotClaimId,
         paused: this.store.schedulerPaused,
         paid: this.store.migrationPaid,
+        gen: localEpochNow() > 0 ? localEpochNow() : null,
       })
-      message = channelIntro(payload)
+      message = buildIntro(false)
+    }
+    if (mint && preBond && message.html.length > 1024) {
+      message = buildIntro(true)
     }
     try {
       await this.broadcast.ensureIntro(payload, message, {
@@ -564,6 +763,20 @@ export class SnapshotEngine {
   stop() {
     if (this.scheduler) clearTimeout(this.scheduler)
     this.scheduler = null
+  }
+
+  /** Drop this copy's qualified-board ids without writing them back. */
+  discardStaleBoard() {
+    this.qualifiedNotified.clear()
+    this.qualifiedWindowKey = ""
+    this.qualifiedMessageId = null
+    this.qualifiedTelegramId = null
+    this.qualifiedTelegramIds = []
+    this.qualifiedFingerprint = null
+    this.qualifiedFpHashFromPin = null
+    this.qualifiedCount = 0
+    this.snapshotClaimId = null
+    this.stop()
   }
 
   pause() {
@@ -668,6 +881,7 @@ export class SnapshotEngine {
     capturedAt?: string
     id?: string
     thesis?: string
+    mint?: string
     /** Skip Telegram qualified notice (e.g. historical backfill). Still counts in the window. */
     silent?: boolean
   }): Callout {
@@ -675,8 +889,12 @@ export class SnapshotEngine {
     if (!this.store.config.calloutSources.includes(source)) {
       throw new Error("Unknown callout source. Sources are configured privately.")
     }
+    const watchMint = this.store.config.coinMint
+    if (input.mint && watchMint && input.mint !== watchMint) {
+      throw new Error("Callout mint does not match the watched coin")
+    }
     const token = resolveCalloutToken(input.token, this.store.config)
-    const windowStart = new Date(this.store.lastSnapshotAt ?? this.store.startedAt)
+    const windowStart = new Date(this.store.windowStartIso())
     const { callout, duplicate } = this.collector.ingestUnique(
       {
         token,
@@ -686,6 +904,7 @@ export class SnapshotEngine {
         capturedAt: input.capturedAt,
         id: input.id,
         thesis: input.thesis,
+        mint: input.mint ?? watchMint ?? undefined,
       },
       windowStart,
       { replace: Boolean(input.id) },
@@ -713,6 +932,7 @@ export class SnapshotEngine {
       this.qualifiedMessageId ??
       (this.qualifiedTelegramId ? String(this.qualifiedTelegramId) : null)
 
+    let boardWasDeleted = false
     if (existingId) {
       try {
         const edited = await this.edit(existingId, message)
@@ -735,16 +955,19 @@ export class SnapshotEngine {
           "warn",
           error instanceof Error ? error.message : "QUALIFIED edit failed — posting a new board",
         )
+        if (qualifiedEditTargetMissing(error)) {
+          boardWasDeleted = true
+          this.qualifiedMessageId = null
+          this.qualifiedTelegramId = null
+          this.qualifiedTelegramIds = []
+        }
       }
     }
 
-    if (this.pinConfigured()) {
+    if (!boardWasDeleted && this.pinConfigured()) {
       this.qualifiedFingerprint = fingerprint
       this.qualifiedFpHashFromPin = hash
       this.qualifiedCount = Math.max(this.qualifiedCount, eligible.length)
-      this.qualifiedMessageId = null
-      this.qualifiedTelegramId = null
-      this.qualifiedTelegramIds = []
       this.persistQualifiedBoard()
       await this.publishChannelIntro(false)
       await this.clock.sleep(QUALIFIED_CLAIM_WAIT_MS)
@@ -752,6 +975,32 @@ export class SnapshotEngine {
       if (this.adoptPinBoard(hash, fingerprint, eligible.length)) {
         await this.deleteQualifiedIds(staleIds, this.qualifiedTelegramId)
         return
+      }
+      if (this.qualifiedCount > eligible.length) return
+      if (this.qualifiedTelegramId) {
+        try {
+          const pinId = String(this.qualifiedTelegramId)
+          const edited = await this.edit(pinId, message)
+          this.qualifiedMessageId = edited.id
+          this.rememberQualifiedTelegramId(edited.telegramMessageId ?? this.qualifiedTelegramId)
+          this.qualifiedFingerprint = fingerprint
+          this.qualifiedFpHashFromPin = hash
+          this.qualifiedCount = Math.max(this.qualifiedCount, eligible.length)
+          this.persistQualifiedBoard()
+          await this.publishChannelIntro(false)
+          await this.deleteQualifiedIds(staleIds, [
+            edited.id,
+            pinId,
+            this.qualifiedTelegramId,
+            edited.telegramMessageId,
+          ])
+          return
+        } catch (error) {
+          this.store.log(
+            "warn",
+            error instanceof Error ? error.message : "QUALIFIED pin edit failed — posting a new board",
+          )
+        }
       }
     }
 
@@ -793,8 +1042,8 @@ export class SnapshotEngine {
   }
 
   /**
-   * First mint from idle: rewrite the waiting pin. Do not purge Telegram —
-   * the channel is already empty except the pin.
+   * First mint from idle: rewrite the waiting pin. Purge leftover QUALIFIED
+   * posts (idle ingest can leak boards because the waiting pin has no qid).
    */
   async launchFromIdle() {
     await this.qualifiedBoardChain
@@ -810,6 +1059,7 @@ export class SnapshotEngine {
     this.store.resetHistoryForMint()
     this.persistSnapshotLedger()
     this.persistQualifiedBoard()
+    await this.broadcast.clear({ purgeTelegram: 500 })
     await this.publishChannelIntro(true)
   }
 
@@ -923,40 +1173,68 @@ export class SnapshotEngine {
   }
 
   private async claimSnapshotSlot(trigger: SnapshotTrigger): Promise<boolean> {
+    const mint = this.config.coinMint
     const now = this.clock.now().getTime()
-    const last = this.store.lastSnapshotAt ? Date.parse(this.store.lastSnapshotAt) : 0
-    if (trigger === "scheduler" && last && now - last < SCHEDULER_DEBOUNCE_MS) {
-      this.store.log("info", "Scheduler snapshot skipped — a snapshot already ran in this window")
-      if (!this.store.nextSnapshotAt || Date.parse(this.store.nextSnapshotAt) <= now) {
-        this.armScheduler(this.randomDelay())
+    const owner = `${now.toString(36)}-${randomBytes(4).toString("hex")}`
+    if (mint) {
+      const got = await acquireSnapshotLock(mint, owner)
+      if (!got) {
+        this.store.log("info", "Snapshot skipped — another isolate holds the snapshot lock")
+        await this.copyAuthoritativeSchedule()
+        return false
       }
+      this.snapLockOwner = owner
+    }
+
+    if (mint) {
+      const watch = await loadPersistedWatch(mint)
+      if (watch?.lastSnapshotAt) this.store.hydrateLedger(watch.lastSnapshotAt, watch.rounds ?? [])
+      if (watch?.nextSnapshotAt) this.store.hydrateScheduler(watch.nextSnapshotAt, watch.schedulerPaused ?? null)
+    }
+
+    const last = this.store.lastSnapshotAt ? Date.parse(this.store.lastSnapshotAt) : 0
+    const minGap = this.schedulerMinGapMs()
+    if (trigger === "scheduler" && last && now - last < minGap) {
+      this.store.log("info", "Scheduler snapshot skipped — a snapshot already ran in this window")
+      await this.copyAuthoritativeSchedule()
+      if (!this.store.nextSnapshotAt || Date.parse(this.store.nextSnapshotAt) <= now) {
+        this.armScheduler(this.msUntilSchedulerGap(last, now))
+      }
+      await this.releaseSnapLock()
       return false
     }
 
     const token = process.env.TELEGRAM_BOT_TOKEN?.trim()
     const chatId = process.env.TELEGRAM_CHANNEL_ID?.trim()
-    if (!token || !chatId) return true
+    if (!token || !chatId) return this.commitSnapshotWindow()
 
     clearPinCache()
     const pin = await readQualifiedBoardFromPin(token, chatId)
-    const pinSnap = pin.lastSnapshotAt ? Date.parse(pin.lastSnapshotAt) : 0
+    const pinSnap = this.pinIsCurrent(pin) && pin.lastSnapshotAt ? Date.parse(pin.lastSnapshotAt) : 0
     if (pinSnap > last) {
       this.store.hydrateLedger(pin.lastSnapshotAt, pin.rounds)
     }
     const latestSnap = Math.max(last, pinSnap)
-    if (trigger === "scheduler" && latestSnap && now - latestSnap < SCHEDULER_DEBOUNCE_MS) {
+    if (trigger === "scheduler" && latestSnap && now - latestSnap < minGap) {
       this.store.log("info", "Scheduler snapshot skipped — pin already has a recent snapshot")
+      this.adoptPublishedSchedule(pin)
+      if (!this.store.nextSnapshotAt || Date.parse(this.store.nextSnapshotAt) <= now) {
+        this.armScheduler(this.msUntilSchedulerGap(latestSnap, now))
+      }
+      await this.releaseSnapLock()
       return false
     }
     if (pin.snapshotClaimId && pin.snapshotClaimId !== this.snapshotClaimId) {
       const claimedAt = claimTimestampMs(pin.snapshotClaimId)
       if (!claimedAt || now - claimedAt < SNAPSHOT_CLAIM_TTL_MS) {
         this.store.log("info", "Snapshot skipped — another isolate already claimed this round")
+        this.adoptPublishedSchedule(pin)
+        await this.releaseSnapLock()
         return false
       }
     }
 
-    this.snapshotClaimId = `${now.toString(36)}-${randomBytes(4).toString("hex")}`
+    this.snapshotClaimId = owner
     this.persistSnapshotLedger()
     await this.publishChannelIntro(false)
     await this.clock.sleep(SNAPSHOT_CLAIM_WAIT_MS)
@@ -965,13 +1243,47 @@ export class SnapshotEngine {
     if (again.snapshotClaimId && again.snapshotClaimId !== this.snapshotClaimId) {
       this.store.log("info", "Snapshot skipped — lost pin claim")
       this.snapshotClaimId = null
+      this.adoptPublishedSchedule(again)
+      await this.releaseSnapLock()
       return false
     }
-    const againSnap = again.lastSnapshotAt ? Date.parse(again.lastSnapshotAt) : 0
-    if (trigger === "scheduler" && againSnap && now - againSnap < SCHEDULER_DEBOUNCE_MS) {
+    const againSnap =
+      this.pinIsCurrent(again) && again.lastSnapshotAt ? Date.parse(again.lastSnapshotAt) : 0
+    if (trigger === "scheduler" && againSnap && now - againSnap < minGap) {
       this.store.hydrateLedger(again.lastSnapshotAt, again.rounds)
       this.snapshotClaimId = null
+      this.adoptPublishedSchedule(again)
+      if (!this.store.nextSnapshotAt || Date.parse(this.store.nextSnapshotAt) <= now) {
+        this.armScheduler(this.msUntilSchedulerGap(againSnap, now))
+      }
+      await this.releaseSnapLock()
       return false
+    }
+    return this.commitSnapshotWindow()
+  }
+
+  /** Hard 5-minute gate. Stale ledger writes cannot move this timestamp backward. */
+  private async commitSnapshotWindow(): Promise<boolean> {
+    const mint = this.config.coinMint
+    const now = this.clock.now().getTime()
+    if (mint) {
+      const knownLast = this.store.lastSnapshotAt ? Date.parse(this.store.lastSnapshotAt) : 0
+      const reserved = await reserveSnapshotWindow(
+        mint,
+        now,
+        this.schedulerMinGapMs(),
+        Number.isFinite(knownLast) ? knownLast : 0,
+      )
+      if (!reserved) {
+        this.store.log("info", "Snapshot skipped — minimum 5 minute gap")
+        await this.copyAuthoritativeSchedule()
+        const next = this.store.nextSnapshotAt ? Date.parse(this.store.nextSnapshotAt) : NaN
+        if (!Number.isFinite(next) || next <= now) {
+          this.armScheduler(this.schedulerMinGapMs())
+        }
+        await this.releaseSnapLock()
+        return false
+      }
     }
     return true
   }
@@ -994,7 +1306,7 @@ export class SnapshotEngine {
 
     const snapshotTimestamp = this.clock.now()
     const previous = this.store.lastSnapshotAt
-    const windowStart = new Date(previous ?? this.store.startedAt)
+    const windowStart = new Date(previous ?? this.store.windowStartIso())
     const callouts = uniqueWindowCallouts(
       this.collector
         .captureWindow(windowStart, snapshotTimestamp)
@@ -1008,7 +1320,8 @@ export class SnapshotEngine {
       this.store.snapshotInProgress = false
       this.store.phase = "idle"
       this.store.log("warn", "Snapshot skipped — no valid callouts in the window.")
-      this.armScheduler(this.randomDelay())
+      this.armScheduler(this.randomDelay(), { force: true })
+      await this.releaseSnapLock()
       return skipped
     }
 
@@ -1038,8 +1351,9 @@ export class SnapshotEngine {
       this.store.phase = "idle"
       this.store.emitState()
       if (!this.store.schedulerPaused) {
-        this.armScheduler(this.randomDelay())
+        this.armScheduler(this.randomDelay(), { force: true })
       }
+      await this.releaseSnapLock()
     }
   }
 
@@ -1057,6 +1371,20 @@ export class SnapshotEngine {
     }
 
     const snapshotNumber = this.snapshotOrdinal(audit)
+
+    // Resolve the actual payout destination for each winner.
+    // FOMO-source winners always pay to the FOMO treasury wallet for manual distribution.
+    const lastPayoutWallet = this.fomoPayoutWallet(selection.lastCallout)
+    const roulettePayoutWallet = this.fomoPayoutWallet(selection.rouletteWinner)
+    const lastCalloutForDisplay =
+      lastPayoutWallet !== selection.lastCallout.wallet
+        ? { ...selection.lastCallout, wallet: lastPayoutWallet }
+        : selection.lastCallout
+    const rouletteWinnerForDisplay =
+      roulettePayoutWallet !== selection.rouletteWinner.wallet
+        ? { ...selection.rouletteWinner, wallet: roulettePayoutWallet }
+        : selection.rouletteWinner
+
     const payoutNotice = (
       lastTx: DistributionTx | null,
       rouletteTx: DistributionTx | null,
@@ -1065,8 +1393,8 @@ export class SnapshotEngine {
       pendingLabel: string | null,
     ) =>
       snapshotPayout({
-        lastCallout: selection.lastCallout,
-        rouletteWinner: selection.rouletteWinner,
+        lastCallout: lastCalloutForDisplay,
+        rouletteWinner: rouletteWinnerForDisplay,
         lastTx,
         rouletteTx,
         allocationAmount,
@@ -1161,6 +1489,17 @@ export class SnapshotEngine {
     audit.allocationAmount = allocationAmount
     audit.distributionToken = distributionToken
 
+    if (lastPayoutWallet !== selection.lastCallout.wallet) {
+      this.walletLog(
+        `[fomo-treasury] Last callout winner @${selection.lastCallout.callerUsername} → FOMO treasury ${lastPayoutWallet.slice(0, 8)}… (manual distribution)`,
+      )
+    }
+    if (roulettePayoutWallet !== selection.rouletteWinner.wallet) {
+      this.walletLog(
+        `[fomo-treasury] Roulette winner @${selection.rouletteWinner.callerUsername} → FOMO treasury ${roulettePayoutWallet.slice(0, 8)}… (manual distribution)`,
+      )
+    }
+
     await this.edit(
       payoutMsg.id,
       payoutNotice(null, null, allocationAmount, distributionToken, pendingLabel),
@@ -1171,7 +1510,7 @@ export class SnapshotEngine {
       calloutId: selection.lastCallout.id,
       token: selection.lastCallout.token,
       callerUsername: selection.lastCallout.callerUsername,
-      wallet: selection.lastCallout.wallet,
+      wallet: lastPayoutWallet,
       amount: allocationAmount,
       distributionToken,
     })
@@ -1195,7 +1534,7 @@ export class SnapshotEngine {
       calloutId: selection.rouletteWinner.id,
       token: selection.rouletteWinner.token,
       callerUsername: selection.rouletteWinner.callerUsername,
-      wallet: selection.rouletteWinner.wallet,
+      wallet: roulettePayoutWallet,
       amount: allocationAmount,
       distributionToken,
     })
@@ -1495,15 +1834,26 @@ export class SnapshotEngine {
     return min + pickIndex(max - min + 1, this.random)
   }
 
-  private armScheduler(delayMs: number) {
+  private armScheduler(delayMs: number, opts?: { force?: boolean }) {
     if (this.store.schedulerPaused) {
       this.store.nextSnapshotAt = null
       this.store.log("info", "[wallet] Snapshot scheduler paused — no next time armed")
       this.store.emitState()
       return
     }
+    const now = this.clock.now().getTime()
+    const nextMs = now + delayMs
+    const current = this.store.nextSnapshotAt ? Date.parse(this.store.nextSnapshotAt) : NaN
+    if (
+      !opts?.force &&
+      Number.isFinite(current) &&
+      current > now + 2_000 &&
+      nextMs < current - 2_000
+    ) {
+      return
+    }
     if (this.scheduler) clearTimeout(this.scheduler)
-    const next = new Date(this.clock.now().getTime() + delayMs)
+    const next = new Date(nextMs)
     this.store.nextSnapshotAt = next.toISOString()
     const secs = Math.max(1, Math.round(delayMs / 1000))
     const mins = Math.floor(secs / 60)
