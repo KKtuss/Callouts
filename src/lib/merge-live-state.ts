@@ -46,6 +46,9 @@ function pickAudits(prev: SnapshotAudit[], next: SnapshotAudit[]): SnapshotAudit
 function logKey(log: EngineLog) {
   const msg = log.message
   if (/\[wallet\] Next snapshot in /.test(msg)) return `${log.level}|next-snapshot`
+  if (/\[wallet\] Pin mint /.test(msg) && /keeping durable mint/.test(msg)) {
+    return `${log.level}|pin-mismatch`
+  }
   if (/\[wallet\] Pin mint /.test(msg) && /starting a fresh window/.test(msg)) {
     return `${log.level}|pin-mismatch`
   }

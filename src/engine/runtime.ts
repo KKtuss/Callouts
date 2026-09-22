@@ -62,49 +62,17 @@ function notePinMintMismatch(runtime: Runtime, pinMint: string | null, mint: str
     pinMismatchLogged.set(runtime.store, key)
     runtime.store.log(
       "info",
-      `[wallet] Pin mint ${pinMint ?? "none"} ≠ ${mint ?? "none"} — starting a fresh window`,
+      `[wallet] Pin mint ${pinMint ?? "none"} ≠ ${mint ?? "none"} — keeping durable mint, refreshing pin`,
     )
   }
-  // Waiting pin is source of truth. Never stamp a previous test mint back onto it.
-  if (!pinMint && mint) {
-    void parkIsolateIdle(runtime, mint)
-    return
-  }
+  // Durable Redis mint owns the live session. A blank/waiting pin (Telegram
+  // flake or race on cold start after deploy) must NEVER clear the ledger —
+  // that used to wipe snapshots/callouts while the mint stayed "live".
   if (!mint || pinIntroRefreshStarted.has(runtime.store)) return
   pinIntroRefreshStarted.add(runtime.store)
   void runtime.engine.publishChannelIntro(false).then(() => {
     clearPinCache()
   })
-}
-
-async function parkIsolateIdle(runtime: Runtime, previousMint?: string | null) {
-  const abandoned = previousMint ?? runtime.store.config.coinMint
-  delete process.env.CALLOUT_MINT
-  process.env.CALLOUT_TOKEN = "SHILL"
-  process.env.DISTRIBUTION_TOKEN = "SHILL"
-  process.env.CALLOUT_NAME = "SHILL"
-  runtime.store.config = {
-    ...runtime.store.config,
-    coinMint: null,
-    coinName: null,
-    distributionToken: "SHILL",
-    pumpIngestEnabled: false,
-    axiomIngestEnabled: false,
-  }
-  runtime.store.pumpIngest.enabled = false
-  runtime.store.axiomIngest.enabled = false
-  runtime.store.schedulerPaused = true
-  runtime.store.nextSnapshotAt = null
-  runtime.pumpPoller.stop()
-  runtime.axiomPoller?.stop()
-  runtime.fomoPoller?.stop()
-  runtime.migrationMonitor.stop()
-  runtime.collector.clear()
-  runtime.store.resetHistoryForMint()
-  runtime.store.schedulerPaused = true
-  runtime.store.nextSnapshotAt = null
-  await clearPersistedWatch(abandoned)
-  runtime.store.log("info", "Pin is waiting — this isolate dropped the previous mint.")
 }
 
 function envNumber(name: string, fallback: number): number {
@@ -625,6 +593,7 @@ function applyLiveMint(
   name: string | null,
 ) {
   if (runtime.store.config.coinMint === mint) return
+  const previous = runtime.store.config.coinMint
   process.env.CALLOUT_MINT = mint
   if (ticker) {
     process.env.CALLOUT_TOKEN = ticker
@@ -646,7 +615,9 @@ function applyLiveMint(
   runtime.pumpPoller.reset()
   runtime.axiomPoller?.reset()
   runtime.fomoPoller?.reset()
-  runtime.store.resetHistoryForMint()
+  // Cold adopt (null → mint): leave history empty for Redis hydrate. Only wipe
+  // when switching between two real mints.
+  if (previous) runtime.store.resetHistoryForMint()
   runtime.store.log("info", `Live mint is ${ticker || mint}`)
 }
 
