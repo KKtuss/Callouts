@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from "react"
 import { mergePublicView } from "@/lib/merge-live-state"
 import type { PublicView } from "@/lib/public-view"
 
-const POLL_MS = 1_000
+/** Fallback poll only while SSE is down — avoid hammering the public API. */
+const FALLBACK_POLL_MS = 10_000
 
 export function usePublicEngine(initialState: PublicView | null = null) {
   const [state, setState] = useState<PublicView | null>(initialState)
@@ -19,12 +20,26 @@ export function usePublicEngine(initialState: PublicView | null = null) {
     let retryTimer: ReturnType<typeof setTimeout> | null = null
     let pollTimer: ReturnType<typeof setInterval> | null = null
     let retryMs = 1000
+    let sseLive = false
 
     const apply = (next: PublicView) => {
       hasState = true
       setState((prev) => mergePublicView(prev, next))
       setError(null)
       setConnected(true)
+    }
+
+    const stopFallbackPoll = () => {
+      if (!pollTimer) return
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+
+    const startFallbackPoll = () => {
+      if (cancelled || pollTimer) return
+      pollTimer = setInterval(() => {
+        void pull()
+      }, FALLBACK_POLL_MS)
     }
 
     const pull = async () => {
@@ -49,15 +64,21 @@ export function usePublicEngine(initialState: PublicView | null = null) {
         try {
           apply(JSON.parse(event.data) as PublicView)
           retryMs = 1000
+          if (!sseLive) {
+            sseLive = true
+            stopFallbackPoll()
+          }
         } catch {
           /* ignore keepalive or malformed */
         }
       }
       source.onerror = () => {
         if (cancelled) return
+        sseLive = false
         setConnected(false)
         source?.close()
         source = null
+        startFallbackPoll()
         if (retryTimer) return
         retryTimer = setTimeout(() => {
           retryTimer = null
@@ -68,14 +89,13 @@ export function usePublicEngine(initialState: PublicView | null = null) {
     }
 
     void pull().then(connectSse)
-    pollTimer = setInterval(() => {
-      void pull()
-    }, POLL_MS)
+    // Until the first SSE message lands, poll slowly so a cold paint still updates.
+    startFallbackPoll()
 
     return () => {
       cancelled = true
       if (retryTimer) clearTimeout(retryTimer)
-      if (pollTimer) clearInterval(pollTimer)
+      stopFallbackPoll()
       source?.close()
     }
   }, [])

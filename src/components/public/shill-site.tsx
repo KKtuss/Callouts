@@ -236,17 +236,28 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 /** The two headline counters: time since last snapshot, and rewards sent. */
 function CounterBar({ state }: { state: PublicView | null }) {
-  const since = useElapsed(state?.engine.lastSnapshotAt ?? state?.engine.startedAt ?? null)
+  const live = Boolean(state?.engine.live)
+  // Idle (no mint) must not count from isolate boot — show a frozen zero.
+  const origin =
+    state?.engine.lastSnapshotAt ?? (live ? state?.engine.startedAt ?? null : null)
+  const since = useElapsed(origin)
   const hasSnapshot = Boolean(state?.engine.lastSnapshotAt)
   const ticker = state?.allocation.distributionToken ?? "SHILL"
   const totals = state?.totals
+  const elapsedLabel =
+    since === null ? (live ? "—" : formatElapsed(0)) : formatElapsed(since)
+  const elapsedCaption = hasSnapshot
+    ? "last settled round"
+    : live
+      ? "waiting for the first snapshot"
+      : "waiting for mint"
 
   return (
     <div className="aqua-panel panel-reveal grid grid-cols-1 gap-5 rounded-3xl px-5 py-5 sm:grid-cols-2 sm:gap-x-6 sm:gap-y-6 sm:px-8 sm:py-6 lg:grid-cols-4">
       <Metric
         label="Time since last snapshot"
-        value={since === null ? "—" : formatElapsed(since)}
-        caption={hasSnapshot ? "last settled round" : "waiting for the first snapshot"}
+        value={elapsedLabel}
+        caption={elapsedCaption}
         accent
       />
       <Metric
@@ -479,28 +490,29 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
     () => {
       if (reducedMotion()) return
 
+      // Touch phones: no GSAP at all. Transforms + ScrollTrigger fight native
+      // scroll and make the decorative layers feel like a stuck overlay.
+      const coarse =
+        typeof window !== "undefined" &&
+        window.matchMedia("(hover: none) and (pointer: coarse)").matches
+      if (coarse) return
+
       gsap.fromTo(
         ".hero-line",
         { opacity: 0, y: 22 },
         { opacity: 1, y: 0, duration: 0.85, ease: "power2.out", stagger: 0.12, delay: 0.1 },
       )
 
-      // Skip perpetual motion on phones — GSAP transforms during scroll feel sticky.
-      const coarse =
-        typeof window !== "undefined" &&
-        window.matchMedia("(hover: none) and (pointer: coarse)").matches
-      if (!coarse) {
-        gsap.to(".hero-logo", { y: -10, duration: 3.6, ease: "sine.inOut", yoyo: true, repeat: -1 })
-        gsap.to(".float-slow", {
-          y: "random(-12, 12)",
-          x: "random(-8, 8)",
-          duration: "random(5, 8)",
-          ease: "sine.inOut",
-          yoyo: true,
-          repeat: -1,
-          stagger: 0.5,
-        })
-      }
+      gsap.to(".hero-logo", { y: -10, duration: 3.6, ease: "sine.inOut", yoyo: true, repeat: -1 })
+      gsap.to(".float-slow", {
+        y: "random(-12, 12)",
+        x: "random(-8, 8)",
+        duration: "random(5, 8)",
+        ease: "sine.inOut",
+        yoyo: true,
+        repeat: -1,
+        stagger: 0.5,
+      })
 
       // Opacity only — never visibility:hidden (autoAlpha), so a missed trigger
       // can't leave the whole board as a blank dark sky.
@@ -541,6 +553,10 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
   useGSAP(
     () => {
       if (reducedMotion()) return
+      const coarse =
+        typeof window !== "undefined" &&
+        window.matchMedia("(hover: none) and (pointer: coarse)").matches
+      if (coarse) return
       const chips = gsap.utils.toArray<HTMLElement>(".voice-chip")
       if (chips.length === 0) return
       gsap.fromTo(
@@ -868,7 +884,7 @@ export function ShillSite({ initialState }: { initialState: PublicView | null })
 
       </main>
 
-      <footer className="relative border-t border-white/40 bg-white/30 backdrop-blur-md">
+      <footer className="relative border-t border-white/40 bg-white/55 sm:bg-white/30 sm:backdrop-blur-md">
         <div className="mx-auto max-w-5xl px-4 py-5 sm:px-5 sm:py-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
             <div className="flex min-w-0 items-center gap-2.5">

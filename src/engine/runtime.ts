@@ -387,6 +387,8 @@ export async function waitForRuntime(): Promise<Runtime> {
   const runtime = getRuntime()
   if (globalRef.__calloutHydrate) await globalRef.__calloutHydrate
   await followDurableMint(runtime)
+  await ensureDurableTreasury(runtime)
+  await ensureDurableFomoWallet(runtime)
   await syncEpoch(runtime)
   if (!runtime.store.config.coinMint) {
     runtime.store.schedulerPaused = true
@@ -404,6 +406,104 @@ export async function waitForRuntime(): Promise<Runtime> {
   await refreshLive(runtime)
   scheduleCatchUp(runtime)
   return runtime
+}
+
+/**
+ * Public facade / board only. Redis hydrate for display — never claims
+ * leadership, never stands down, never polls Pump/migration, never arms the
+ * snapshot scheduler, never clears an idle mint. Cron, ingest, and OPS keep
+ * using waitForRuntime() so the live session stays on that path.
+ */
+export async function waitForPublicRuntime(): Promise<Runtime> {
+  const runtime = getRuntime()
+  // Warm leader already has fresh in-memory callouts — skip Redis.
+  const liveLeader =
+    Boolean(runtime.store.config.coinMint) &&
+    runtime.store.pumpIngest.enabled &&
+    runtime.store.pumpIngest.connected
+  if (liveLeader) return runtime
+  await hydratePublicDisplay(runtime)
+  return runtime
+}
+
+/** Additive Redis board hydrate. Safe on a warm leader (merge-only). */
+async function hydratePublicDisplay(runtime: Runtime) {
+  try {
+    const cfg = await loadDurableConfig()
+    if (cfg) {
+      const patch: Partial<EngineConfig> = {}
+      if (cfg.fomoTreasuryWallet !== null && cfg.fomoTreasuryWallet !== undefined) {
+        patch.fomoTreasuryWallet = cfg.fomoTreasuryWallet
+      }
+      if (cfg.snapshotMinMs !== null && cfg.snapshotMinMs !== undefined) {
+        patch.snapshotMinMs = cfg.snapshotMinMs
+      }
+      if (cfg.snapshotMaxMs !== null && cfg.snapshotMaxMs !== undefined) {
+        patch.snapshotMaxMs = cfg.snapshotMaxMs
+      }
+      if (cfg.allocationAmount !== null && cfg.allocationAmount !== undefined) {
+        patch.allocationAmount = cfg.allocationAmount
+      }
+      if (cfg.creatorRewardShareBps !== null && cfg.creatorRewardShareBps !== undefined) {
+        patch.creatorRewardShareBps = cfg.creatorRewardShareBps
+      }
+      if (cfg.treasuryPublicAddress) {
+        patch.treasuryPublicAddress = cfg.treasuryPublicAddress
+        runtime.store.treasuryPublicAddress = cfg.treasuryPublicAddress
+      }
+
+      // Adopt a live mint for display. Never applyIdleMint here — clearing a
+      // mint must stay on the admin/OPS path so public traffic cannot stop pollers.
+      if (Object.prototype.hasOwnProperty.call(cfg, "coinMint")) {
+        const minted =
+          typeof cfg.coinMint === "string" && isMintAddress(cfg.coinMint) ? cfg.coinMint : null
+        if (minted) {
+          applyLiveMint(runtime, minted, cfg.distributionToken ?? null, cfg.coinName ?? null)
+        }
+      }
+
+      if (Object.keys(patch).length > 0) {
+        runtime.store.config = { ...runtime.store.config, ...patch }
+      }
+    }
+
+    const mint = runtime.store.config.coinMint
+    if (!mint) return
+
+    const persisted = await loadPersistedWatch(mint)
+    if (!persisted || persisted.mint !== mint) return
+
+    if (persisted.wipedAt) {
+      runtime.store.dropHistoryAtOrBefore(persisted.wipedAt)
+      runtime.store.watchStartedAt = persisted.wipedAt
+    }
+
+    runtime.store.hydrateLedger(persisted.lastSnapshotAt ?? null, persisted.rounds ?? [])
+    // Skip hydrateScheduler — public reads must not pause/rearm the deadline.
+    runtime.store.hydrateMigration(persisted.migrationPaid === true)
+    if (persisted.migrationSawOpen) runtime.store.migrationSawOpen = true
+    if (persisted.lifetimeCallouts?.length) {
+      runtime.store.hydrateLifetimeCallouts(
+        expandCallouts(
+          persisted.lifetimeCallouts,
+          runtime.store.config.distributionToken,
+          runtime.store.config.coinMint,
+        ),
+      )
+    }
+
+    const windowStart = runtime.store.windowStartIso()
+    hydrateCollectorCallouts(
+      runtime.collector,
+      runtime.store.config.distributionToken,
+      persisted.callouts,
+      windowStart,
+      mint,
+    )
+    if (persisted.wipedAt) runtime.collector.dropAtOrBefore(persisted.wipedAt)
+  } catch (error) {
+    console.warn("[public-runtime] display hydrate failed", error)
+  }
 }
 
 /**
@@ -484,6 +584,38 @@ async function followDurableMint(runtime: Runtime) {
   const minted = typeof cfg.coinMint === "string" && isMintAddress(cfg.coinMint) ? cfg.coinMint : null
   if (minted) applyLiveMint(runtime, minted, cfg.distributionToken ?? null, cfg.coinName ?? null)
   else applyIdleMint(runtime)
+}
+
+/** Warm isolates must pick up a treasury key saved after they first booted. */
+async function ensureDurableTreasury(runtime: Runtime) {
+  const cfg = await loadDurableConfig()
+  if (!cfg?.encryptedTreasuryKey) {
+    if (runtime.store.treasuryKeyConfigured && !process.env.TREASURY_PRIVATE_KEY?.trim()) {
+      runtime.engine.setTreasuryPrivateKey(null)
+    }
+    return
+  }
+  const adminKey = process.env.ADMIN_KEY?.trim()
+  if (!adminKey) return
+  const raw = decryptTreasuryKey(cfg.encryptedTreasuryKey, adminKey)
+  if (!raw) return
+  // Always re-apply — a newer durable key must replace a stale in-memory key.
+  runtime.engine.setTreasuryPrivateKey(raw)
+  runtime.store.config = {
+    ...runtime.store.config,
+    treasuryPublicAddress: runtime.store.treasuryPublicAddress,
+  }
+}
+
+/** FOMO payout address is durable too — keep warm isolates in sync. */
+async function ensureDurableFomoWallet(runtime: Runtime) {
+  const cfg = await loadDurableConfig()
+  if (!cfg || cfg.fomoTreasuryWallet === undefined) return
+  if (runtime.store.config.fomoTreasuryWallet === cfg.fomoTreasuryWallet) return
+  runtime.store.config = {
+    ...runtime.store.config,
+    fomoTreasuryWallet: cfg.fomoTreasuryWallet,
+  }
 }
 
 function applyLiveMint(

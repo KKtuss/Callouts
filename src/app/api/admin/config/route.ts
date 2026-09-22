@@ -43,6 +43,16 @@ export async function POST(request: Request) {
       else await clearWatchMint()
     }
 
+    // Mint start can reload an older durable key during hydrate — re-apply the
+    // key from this request so the new treasury wins.
+    if (Object.prototype.hasOwnProperty.call(body, "treasuryPrivateKey")) {
+      const raw = body.treasuryPrivateKey
+      const trimmed = typeof raw === "string" && raw.trim() ? raw.trim() : null
+      getRuntime().engine.setTreasuryPrivateKey(trimmed)
+      const adminKey = process.env.ADMIN_KEY?.trim() ?? ""
+      encryptedKey = trimmed && adminKey ? encryptTreasuryKey(trimmed, adminKey) : null
+    }
+
     if (Object.prototype.hasOwnProperty.call(body, "axiomCookie")) {
       const raw = body.axiomCookie
       setAxiomCookie(typeof raw === "string" && raw.trim() ? raw.trim() : null)

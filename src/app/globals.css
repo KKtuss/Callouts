@@ -323,9 +323,36 @@
     backdrop-filter: blur(18px) saturate(1.3);
   }
 
+  /* Phones: drop the full-page film, blurs, and spinning rings — they feel like
+     a sticky overlay and tank scroll compositing. */
   @media (hover: none) and (pointer: coarse) {
+    .aqua-world::before {
+      animation: none;
+      filter: none;
+      opacity: 0.28;
+      transform: none;
+    }
+
+    .aqua-world::after {
+      opacity: 0.06;
+    }
+
+    .scene-caustics,
+    .scene-floor {
+      filter: none;
+    }
+
+    .scene-caustics {
+      opacity: 0.45;
+    }
+
     .aqua-panel {
-      backdrop-filter: blur(8px) saturate(1.15);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+
+    .flywheel-ring {
+      animation: none;
     }
   }
 
@@ -661,6 +688,8 @@
 
   .aqua-world::before {
     animation: none;
+    filter: none;
+    transform: none;
   }
 
   .flywheel-ring {

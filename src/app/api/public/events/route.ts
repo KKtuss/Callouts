@@ -1,4 +1,4 @@
-import { waitForRuntime } from "@/engine/runtime"
+import { waitForPublicRuntime } from "@/engine/runtime"
 import { toPublicView } from "@/lib/public-view"
 
 export const dynamic = "force-dynamic"
@@ -6,7 +6,8 @@ export const runtime = "nodejs"
 export const maxDuration = 300
 
 export async function GET(request: Request) {
-  const { store, engine } = await waitForRuntime()
+  // Display-only path — no catchUp / leadership. Cron + OPS own the scheduler.
+  const { store } = await waitForPublicRuntime()
   const encoder = new TextEncoder()
 
   const stream = new ReadableStream({
@@ -57,7 +58,6 @@ export async function GET(request: Request) {
 
       const keepalive = setInterval(() => {
         if (closed) return
-        void engine.catchUp().catch(() => undefined)
         try {
           controller.enqueue(encoder.encode(`: keepalive\n\n`))
         } catch {
